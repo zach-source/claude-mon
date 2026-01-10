@@ -1,0 +1,17 @@
+# Binaries
+bin/
+claude-follow-tui
+*.exe
+
+# Test output
+coverage.out
+*.test
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
