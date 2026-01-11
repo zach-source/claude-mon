@@ -1,0 +1,50 @@
+[
+  {
+    "timestamp": "2026-01-11T00:11:32.644886-05:00",
+    "file_path": "/Users/ztaylor/repos/workspaces/claude-follow-tui/internal/model/model.go",
+    "tool_name": "Edit",
+    "old_string": "// Model is the Bubbletea model",
+    "new_string": "// Model is the main Bubbletea TUI model",
+    "line_num": 69,
+    "line_count": 1,
+    "commit_sha": "db8fb07e2caf1352ce5e4ac345a4e7b928f2b4ed",
+    "commit_short": "db8fb07",
+    "vcs_type": "git"
+  },
+  {
+    "timestamp": "2026-01-11T00:11:38.071644-05:00",
+    "file_path": "/Users/ztaylor/repos/workspaces/claude-follow-tui/internal/history/history.go",
+    "tool_name": "Edit",
+    "old_string": "// Store manages persistent history storage",
+    "new_string": "// Store manages persistent JSON history storage",
+    "line_num": 26,
+    "line_count": 1,
+    "commit_sha": "db8fb07e2caf1352ce5e4ac345a4e7b928f2b4ed",
+    "commit_short": "db8fb07",
+    "vcs_type": "git"
+  },
+  {
+    "timestamp": "2026-01-11T00:11:43.649134-05:00",
+    "file_path": "/Users/ztaylor/repos/workspaces/claude-follow-tui/cmd/claude-follow-tui/main.go",
+    "tool_name": "Edit",
+    "old_string": "selectedTheme = \"dark\"",
+    "new_string": "selectedTheme = \"catppuccin\"",
+    "line_num": 19,
+    "line_count": 1,
+    "commit_sha": "db8fb07e2caf1352ce5e4ac345a4e7b928f2b4ed",
+    "commit_short": "db8fb07",
+    "vcs_type": "git"
+  },
+  {
+    "timestamp": "2026-01-11T16:48:47.018606-05:00",
+    "file_path": "/Users/ztaylor/repos/workspaces/claude-follow-tui/internal/socket/socket.go",
+    "tool_name": "Edit",
+    "old_string": "// GetSocketPath returns the socket path",
+    "new_string": "// GetSocketPath returns the Unix domain socket path",
+    "line_num": 12,
+    "line_count": 1,
+    "commit_sha": "db8fb07e2caf1352ce5e4ac345a4e7b928f2b4ed",
+    "commit_short": "db8fb07",
+    "vcs_type": "git"
+  }
+]

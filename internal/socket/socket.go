@@ -3,6 +3,7 @@ package socket
 import (
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -43,6 +44,7 @@ func GetSocketPath() string {
 type Listener struct {
 	socketPath string
 	listener   net.Listener
+	messages   chan []byte
 }
 
 // NewListener creates a new socket listener
@@ -60,29 +62,45 @@ func NewListener(socketPath string) (*Listener, error) {
 	return &Listener{
 		socketPath: socketPath,
 		listener:   listener,
+		messages:   make(chan []byte, 100), // Buffered channel for messages
 	}, nil
 }
 
 // Listen starts accepting connections and calls handler for each payload
 func (l *Listener) Listen(handler func([]byte)) {
+	// Start a goroutine to process messages from the channel
+	go func() {
+		for data := range l.messages {
+			handler(data)
+		}
+	}()
+
+	// Accept connections and queue messages
 	for {
 		conn, err := l.listener.Accept()
 		if err != nil {
 			// Listener was closed
+			close(l.messages)
 			return
 		}
 
 		go func(c net.Conn) {
 			defer c.Close()
 
-			// Read all data from connection
-			buf := make([]byte, 64*1024) // 64KB buffer
-			n, err := c.Read(buf)
+			// Read all data from connection until EOF
+			data, err := io.ReadAll(c)
 			if err != nil {
 				return
 			}
 
-			handler(buf[:n])
+			if len(data) > 0 {
+				// Send to buffered channel (non-blocking if buffer not full)
+				select {
+				case l.messages <- data:
+				default:
+					// Buffer full, drop message (shouldn't happen with 100 buffer)
+				}
+			}
 		}(conn)
 	}
 }
