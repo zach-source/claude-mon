@@ -12,6 +12,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/ztaylor/claude-follow-tui/internal/diff"
 	"github.com/ztaylor/claude-follow-tui/internal/highlight"
@@ -237,7 +239,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.planViewport.Width == 0 {
 					m.planViewport = viewport.New(m.width-10, m.height-8)
 				}
-				m.planViewport.SetContent(m.planContent)
+				// Render markdown with glamour
+				rendered, err := m.renderMarkdown(m.planContent, m.width-12)
+				if err != nil {
+					logger.Log("Failed to render markdown: %v", err)
+					m.planViewport.SetContent(m.planContent) // Fallback to raw
+				} else {
+					m.planViewport.SetContent(rendered)
+				}
 			}
 
 		case "n":
@@ -1223,4 +1232,30 @@ func (m Model) renderPlanPopup() string {
 		lipgloss.WithWhitespaceChars(" "),
 		lipgloss.WithWhitespaceForeground(lipgloss.Color("0")),
 	)
+}
+
+// renderMarkdown renders markdown content using glamour
+func (m Model) renderMarkdown(content string, width int) (string, error) {
+	// Choose style based on current theme
+	style := styles.DarkStyleConfig
+	if m.theme.Name == "light" {
+		style = styles.LightStyleConfig
+	}
+
+	// Create renderer with the appropriate style and width
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStyles(style),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		return "", err
+	}
+
+	rendered, err := r.Render(content)
+	if err != nil {
+		return "", err
+	}
+
+	// Trim trailing whitespace
+	return strings.TrimRight(rendered, "\n"), nil
 }
