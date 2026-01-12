@@ -82,8 +82,8 @@ func TestModelNew(t *testing.T) {
 		t.Error("changes should be empty initially")
 	}
 
-	if m.activePane != PaneHistory {
-		t.Error("active pane should be history initially")
+	if m.activePane != PaneLeft {
+		t.Error("active pane should be left pane initially")
 	}
 }
 
@@ -160,8 +160,8 @@ func TestModelNavigation(t *testing.T) {
 	// Test tab switches panes
 	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyTab})
 	model = tm.(Model)
-	if model.activePane != PaneDiff {
-		t.Error("expected diff pane after tab")
+	if model.activePane != PaneRight {
+		t.Error("expected right pane after tab")
 	}
 }
 
