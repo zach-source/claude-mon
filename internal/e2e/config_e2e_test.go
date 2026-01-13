@@ -258,6 +258,10 @@ query_socket = "` + querySocket + `"
 [query]
 default_limit = 10
 max_limit = 50
+
+[workspaces]
+tracked = []
+ignored = []
 `
 
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
