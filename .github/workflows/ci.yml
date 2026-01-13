@@ -28,6 +28,24 @@ jobs:
       - name: Test
         run: go test -v ./...
 
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build binary for tests
+        run: go build -o bin/claude-mon ./cmd/claude-mon
+
+      - name: Run E2E tests
+        run: go test -v ./internal/e2e/...
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -48,7 +66,7 @@ jobs:
 
   tag:
     name: Create Release Tag
-    needs: [test, lint]
+    needs: [test, lint, e2e]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
