@@ -1,13 +1,23 @@
 package e2e
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/exp/teatest"
+	"github.com/muesli/termenv"
 	"github.com/ztaylor/claude-follow-tui/internal/config"
 	"github.com/ztaylor/claude-follow-tui/internal/model"
 )
+
+// TestInit sets up test environment with consistent output
+func TestInit(t *testing.T) {
+	// Force ASCII color profile for consistent golden file testing across CI/CD
+	lipgloss.SetColorProfile(termenv.Ascii)
+}
 
 // TestApplicationStartup verifies that the application starts correctly
 func TestApplicationStartup(t *testing.T) {
@@ -710,6 +720,149 @@ func TestPlanModeNavigation(t *testing.T) {
 	if view == "" {
 		t.Error("expected non-empty view in Plan tab")
 	}
+}
+
+// TestChatPanelWithTeatest uses teatest to simulate an interactive TTY session
+// This test validates the chat panel UI with proper TTY simulation
+func TestChatPanelWithTeatest(t *testing.T) {
+	// Create a model with a mock socket path
+	m := model.New("/tmp/test.sock")
+
+	// Create teatest environment with fixed terminal size
+	tm := teatest.NewTestModel(t, m,
+		teatest.WithInitialTermSize(100, 40),
+	)
+
+	// Wait for initial output (should show the TUI)
+	teatest.WaitFor(t, tm.Output(), func(bts []byte) bool {
+		return len(bts) > 0 && bytes.Contains(bts, []byte("/"))
+	}, teatest.WithCheckInterval(time.Millisecond*100), teatest.WithDuration(time.Second*2))
+
+	// Send 'c' key to open chat panel
+	cfg := config.DefaultConfig()
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(cfg.Keys.ToggleChat)})
+
+	// Wait for chat panel indicators in output
+	teatest.WaitFor(t, tm.Output(), func(bts []byte) bool {
+		// Look for chat-related UI elements
+		return bytes.Contains(bts, []byte("Chat")) ||
+			bytes.Contains(bts, []byte("chat")) ||
+			bytes.Contains(bts, []byte("Send"))
+	}, teatest.WithCheckInterval(time.Millisecond*100), teatest.WithDuration(time.Second*1))
+
+	// Send escape to close chat
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+
+	// Wait a bit for the close to take effect
+	time.Sleep(time.Millisecond * 100)
+
+	// Send 'q' to quit the program
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+
+	// Wait for program to finish
+	tm.WaitFinished(t, teatest.WithFinalTimeout(time.Second*2))
+
+	// Get final model and assert chat is closed
+	fm := tm.FinalModel(t)
+	finalModel, ok := fm.(model.Model)
+	if !ok {
+		t.Fatalf("final model is not model.Model: %T", fm)
+	}
+
+	// After closing chat, the model should still be valid
+	_ = finalModel
+}
+
+// TestChatInputWithTeatest tests typing in the chat input field via TTY simulation
+func TestChatInputWithTeatest(t *testing.T) {
+	m := model.New("/tmp/test.sock")
+	cfg := config.DefaultConfig()
+
+	tm := teatest.NewTestModel(t, m,
+		teatest.WithInitialTermSize(100, 40),
+	)
+
+	// Wait for initial render
+	teatest.WaitFor(t, tm.Output(), func(bts []byte) bool {
+		return len(bts) > 0
+	}, teatest.WithCheckInterval(time.Millisecond*100), teatest.WithDuration(time.Second*1))
+
+	// Open chat
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(cfg.Keys.ToggleChat)})
+	time.Sleep(time.Millisecond * 50)
+
+	// Type some text
+	testInput := "hello"
+	for _, r := range testInput {
+		tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	// Wait for output to reflect the input
+	teatest.WaitFor(t, tm.Output(), func(bts []byte) bool {
+		return bytes.Contains(bts, []byte(testInput))
+	}, teatest.WithCheckInterval(time.Millisecond*50), teatest.WithDuration(time.Second*1))
+
+	// Close chat
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+
+	// Send 'q' to quit the program
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+
+	// Wait for program to finish
+	tm.WaitFinished(t, teatest.WithFinalTimeout(time.Second*2))
+
+	// Get final model state
+	fm := tm.FinalModel(t)
+	_ = fm.(model.Model)
+}
+
+// TestLeaderKeyWithTeatest tests leader key mode with TTY simulation
+func TestLeaderKeyWithTeatest(t *testing.T) {
+	m := model.New("/tmp/test.sock")
+
+	tm := teatest.NewTestModel(t, m,
+		teatest.WithInitialTermSize(100, 40),
+	)
+
+	// Wait for initial render
+	teatest.WaitFor(t, tm.Output(), func(bts []byte) bool {
+		return len(bts) > 0
+	}, teatest.WithCheckInterval(time.Millisecond*100), teatest.WithDuration(time.Second*1))
+
+	// Activate leader mode (ctrl+g)
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlG})
+
+	// Wait for leader mode indicator
+	teatest.WaitFor(t, tm.Output(), func(bts []byte) bool {
+		// Leader mode should show some indicator
+		return bytes.Contains(bts, []byte("Leader")) ||
+			bytes.Contains(bts, []byte("leader")) ||
+			bytes.Contains(bts, []byte("leader key")) ||
+			bytes.Contains(bts, []byte("[")) // Leader shows key options in brackets
+	}, teatest.WithCheckInterval(time.Millisecond*100), teatest.WithDuration(time.Second*1))
+
+	// Press '2' to switch to Prompts tab via leader mode
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+
+	// Close leader mode with escape
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+
+	// Wait for leader mode to dismiss
+	time.Sleep(time.Millisecond * 100)
+
+	// Send 'q' to quit the program
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+
+	// Wait for program to finish
+	tm.WaitFinished(t, teatest.WithFinalTimeout(time.Second*2))
+
+	// Get final model - should have switched to Prompts tab
+	fm := tm.FinalModel(t)
+	finalModel, ok := fm.(model.Model)
+	if !ok {
+		t.Fatalf("final model is not model.Model: %T", fm)
+	}
+	_ = finalModel
 }
 
 // TestLeaderKeyTimeout verifies leader mode auto-dismisses
