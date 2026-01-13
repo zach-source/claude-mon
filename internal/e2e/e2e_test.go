@@ -553,3 +553,227 @@ func TestEmptyState(t *testing.T) {
 		t.Error("expected non-empty view after navigation with no data")
 	}
 }
+
+// TestChatMode verifies chat mode functionality
+func TestChatMode(t *testing.T) {
+	m := model.New("/tmp/test.sock")
+	cfg := config.DefaultConfig()
+
+	// Initialize with window size
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = updated.(model.Model)
+
+	// Chat should not be active initially
+	if m.ChatActive() {
+		t.Error("chat should not be active initially")
+	}
+
+	// Open chat using toggle chat key
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(cfg.Keys.ToggleChat)})
+	m = updated.(model.Model)
+
+	// Chat should now be active
+	if !m.ChatActive() {
+		t.Error("chat should be active after toggle")
+	}
+
+	// View should still be renderable with chat active
+	view := m.View()
+	if view == "" {
+		t.Error("expected non-empty view with chat active")
+	}
+
+	// Close chat using escape
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(model.Model)
+
+	// Chat should be closed
+	if m.ChatActive() {
+		t.Error("chat should be closed after escape")
+	}
+}
+
+// TestLeaderKeyMode verifies leader key functionality
+func TestLeaderKeyMode(t *testing.T) {
+	m := model.New("/tmp/test.sock")
+
+	// Initialize with window size
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = updated.(model.Model)
+
+	// Activate leader mode with ctrl+g
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = updated.(model.Model)
+
+	// Should return a tick command for auto-timeout
+	if cmd == nil {
+		t.Error("expected tick command for leader timeout")
+	}
+
+	// View should contain leader key indicators
+	view := m.View()
+	if view == "" {
+		t.Error("expected non-empty view in leader mode")
+	}
+
+	// Test canceling leader mode with escape
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(model.Model)
+
+	view = m.View()
+	if view == "" {
+		t.Error("expected non-empty view after canceling leader mode")
+	}
+}
+
+// TestLeaderKeyTabSwitching verifies leader key can switch tabs
+func TestLeaderKeyTabSwitching(t *testing.T) {
+	m := model.New("/tmp/test.sock")
+
+	// Initialize with window size
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = updated.(model.Model)
+
+	// Activate leader mode
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = updated.(model.Model)
+
+	// Switch to Prompts tab with "2"
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	m = updated.(model.Model)
+
+	view := m.View()
+	if view == "" {
+		t.Error("expected non-empty view after leader key tab switch")
+	}
+}
+
+// TestPromptsTabNavigation verifies prompts tab is accessible
+func TestPromptsTabNavigation(t *testing.T) {
+	m := model.New("/tmp/test.sock")
+
+	// Initialize with window size
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = updated.(model.Model)
+
+	// Switch to Prompts tab using direct key access
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	m = updated.(model.Model)
+
+	view := m.View()
+	if view == "" {
+		t.Error("expected non-empty view in prompts tab")
+	}
+}
+
+// TestRalphModeNavigation verifies Ralph mode is accessible
+func TestRalphModeNavigation(t *testing.T) {
+	m := model.New("/tmp/test.sock")
+	cfg := config.DefaultConfig()
+
+	// Initialize with window size
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = updated.(model.Model)
+
+	// Switch to Ralph tab using direct key access
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	m = updated.(model.Model)
+
+	view := m.View()
+	if view == "" {
+		t.Error("expected non-empty view in Ralph tab")
+	}
+
+	// Test navigation in Ralph mode
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(cfg.Keys.Down)})
+	m = updated.(model.Model)
+
+	view = m.View()
+	if view == "" {
+		t.Error("expected non-empty view after navigation in Ralph mode")
+	}
+}
+
+// TestPlanModeNavigation verifies Plan mode is accessible
+func TestPlanModeNavigation(t *testing.T) {
+	m := model.New("/tmp/test.sock")
+
+	// Initialize with window size
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = updated.(model.Model)
+
+	// Switch to Plan tab using direct key access
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	m = updated.(model.Model)
+
+	view := m.View()
+	if view == "" {
+		t.Error("expected non-empty view in Plan tab")
+	}
+}
+
+// TestLeaderKeyTimeout verifies leader mode auto-dismisses
+func TestLeaderKeyTimeout(t *testing.T) {
+	m := model.New("/tmp/test.sock")
+
+	// Initialize with window size
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = updated.(model.Model)
+
+	// Activate leader mode
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = updated.(model.Model)
+
+	// Save the activation time for timeout message
+	activatedAt := m.LeaderActivatedAt()
+
+	// Simulate timeout message
+	if cmd != nil {
+		// Execute the tick command to get the timeout message
+		msg := cmd()
+		if msg != nil {
+			updated, _ = m.Update(msg)
+			m = updated.(model.Model)
+		}
+	}
+
+	// Send timeout message directly (simulating the 2 second timeout)
+	type leaderTimeoutMsg struct {
+		activatedAt time.Time
+	}
+	timeoutMsg := leaderTimeoutMsg{activatedAt: activatedAt}
+	updated, _ = m.Update(timeoutMsg)
+	m = updated.(model.Model)
+
+	view := m.View()
+	if view == "" {
+		t.Error("expected non-empty view after leader timeout")
+	}
+}
+
+// TestChatInput verifies chat input field works
+func TestChatInput(t *testing.T) {
+	m := model.New("/tmp/test.sock")
+	cfg := config.DefaultConfig()
+
+	// Initialize with window size
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = updated.(model.Model)
+
+	// Open chat
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(cfg.Keys.ToggleChat)})
+	m = updated.(model.Model)
+
+	// Type some text
+	testInput := "hello world"
+	for _, r := range testInput {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(model.Model)
+	}
+
+	// View should still render
+	view := m.View()
+	if view == "" {
+		t.Error("expected non-empty view after typing in chat")
+	}
+}

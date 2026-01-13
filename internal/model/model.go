@@ -338,6 +338,16 @@ func (m Model) Init() tea.Cmd {
 	return nil
 }
 
+// ChatActive returns whether chat mode is currently active
+func (m Model) ChatActive() bool {
+	return m.chatActive
+}
+
+// LeaderActivatedAt returns when leader mode was activated
+func (m Model) LeaderActivatedAt() time.Time {
+	return m.leaderActivatedAt
+}
+
 // addToast adds a new toast notification
 func (m *Model) addToast(message string, toastType ToastType) {
 	m.toasts = append(m.toasts, Toast{
