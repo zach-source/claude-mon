@@ -143,25 +143,32 @@ func TestModelNavigation(t *testing.T) {
 		t.Fatalf("expected 3 changes, got %d", len(model.changes))
 	}
 
-	// Test navigation down
+	// Test navigation down (default key: j)
 	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	model = tm.(Model)
 	if model.selectedIndex != 1 {
 		t.Errorf("expected selected index 1 after j, got %d", model.selectedIndex)
 	}
 
-	// Test navigation up
+	// Test navigation up (default key: k)
 	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
 	model = tm.(Model)
 	if model.selectedIndex != 0 {
 		t.Errorf("expected selected index 0 after k, got %d", model.selectedIndex)
 	}
 
-	// Test tab switches panes
-	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyTab})
+	// Test pane switching with ] (default key for RightPane)
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
 	model = tm.(Model)
 	if model.activePane != PaneRight {
-		t.Error("expected right pane after tab")
+		t.Error("expected right pane after ] key")
+	}
+
+	// Test switching back to left pane with [ (default key for LeftPane)
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
+	model = tm.(Model)
+	if model.activePane != PaneLeft {
+		t.Error("expected left pane after [ key")
 	}
 }
 
@@ -174,8 +181,8 @@ func TestModelClearHistory(t *testing.T) {
 	payload := `{"tool_name":"Edit","tool_input":{"file_path":"/test.go"}}`
 	tm, _ = tm.Update(SocketMsg{Payload: []byte(payload)})
 
-	// Clear history
-	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	// Clear history with uppercase C (default config key)
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}, Alt: false})
 
 	model := tm.(Model)
 	if len(model.changes) != 0 {

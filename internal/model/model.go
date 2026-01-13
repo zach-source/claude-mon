@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/ztaylor/claude-follow-tui/internal/chat"
+	"github.com/ztaylor/claude-follow-tui/internal/config"
 	"github.com/ztaylor/claude-follow-tui/internal/diff"
 	"github.com/ztaylor/claude-follow-tui/internal/highlight"
 	"github.com/ztaylor/claude-follow-tui/internal/history"
@@ -61,6 +62,14 @@ type planGeneratedMsg struct {
 // planGenerateErrorMsg is sent when plan generation fails
 type planGenerateErrorMsg struct {
 	err error
+}
+
+// planEditedMsg is sent when plan editing completes
+type planEditedMsg struct{}
+
+// leaderTimeoutMsg is sent when leader mode should auto-dismiss
+type leaderTimeoutMsg struct {
+	activatedAt time.Time // To verify we're timing out the right activation
 }
 
 // Change represents a single file change from Claude
@@ -185,6 +194,16 @@ type Model struct {
 	chat         *chat.ClaudeChat // Chat subprocess manager
 	chatInput    textinput.Model  // Chat input field
 	chatViewport viewport.Model   // Chat output viewport
+
+	// Layout
+	hideLeftPane bool // Toggle left pane visibility
+
+	// Leader key / which-key state
+	leaderActive      bool      // Whether leader popup is showing
+	leaderActivatedAt time.Time // When leader mode was activated (for timeout)
+
+	// Configuration
+	config *config.Config // User configuration
 }
 
 // Option is a functional option for configuring the Model
@@ -204,9 +223,28 @@ func WithPersistence(enabled bool) Option {
 	}
 }
 
+// WithConfig sets a custom configuration for the model
+func WithConfig(cfg *config.Config) Option {
+	return func(m *Model) {
+		m.config = cfg
+	}
+}
+
 // New creates a new Model with optional configuration
 func New(socketPath string, opts ...Option) Model {
-	t := theme.Default()
+	// Load configuration
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Log("Failed to load config: %v, using defaults", err)
+		cfg = config.DefaultConfig()
+	}
+
+	// Get theme from config
+	t := theme.Get(cfg.Theme)
+	if t == nil {
+		t = theme.Default()
+	}
+
 	m := Model{
 		socketPath:   socketPath,
 		changes:      []Change{},
@@ -216,10 +254,22 @@ func New(socketPath string, opts ...Option) Model {
 		theme:        t,
 		highlighter:  highlight.NewHighlighter(t),
 		diffCache:    make(map[int]string),
+		config:       cfg,
 	}
 
 	for _, opt := range opts {
 		opt(&m)
+	}
+
+	// If config was changed via option, update theme to match
+	if m.config != cfg {
+		cfg = m.config
+		t = theme.Get(cfg.Theme)
+		if t == nil {
+			t = theme.Default()
+		}
+		m.theme = t
+		m.highlighter = highlight.NewHighlighter(t)
 	}
 
 	// Recreate highlighter if theme was changed via option
@@ -354,26 +404,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Global keys (work in any mode)
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		case "?":
+		key := msg.String()
+
+		// Handle leader key mode
+		if m.leaderActive {
+			return m.handleLeaderKey(msg)
+		}
+
+		// Activate leader key mode (ctrl+g by default)
+		if key == m.config.LeaderKey {
+			logger.Log("Leader mode activated")
+			m.leaderActive = true
+			m.leaderActivatedAt = time.Now()
+			// Start timeout - auto-dismiss after 2 seconds
+			return m, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+				return leaderTimeoutMsg{activatedAt: m.leaderActivatedAt}
+			})
+		}
+
+		// Handle chat mode keys FIRST - chat captures all input except leader key
+		if m.chatActive {
+			return m.handleChatKeys(msg)
+		}
+
+		// Global keys (work in any mode when chat is NOT active)
+		switch key {
+		case m.config.Keys.Help:
 			m.showHelp = true
 			return m, nil
-		case "tab":
+		case m.config.Keys.NextTab:
 			// Cycle to next tab/mode
 			m.cycleMode(1)
 			return m, nil
-		case "shift+tab":
+		case m.config.Keys.PrevTab:
 			// Cycle to previous tab/mode
 			m.cycleMode(-1)
 			return m, nil
-		case "[":
-			// Switch to left pane
-			m.activePane = PaneLeft
+		case m.config.Keys.LeftPane:
+			// Switch to left pane (only if visible)
+			if !m.hideLeftPane {
+				m.activePane = PaneLeft
+			}
 			return m, nil
-		case "]":
+		case m.config.Keys.RightPane:
 			// Switch to right pane
 			m.activePane = PaneRight
 			return m, nil
@@ -393,21 +466,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Direct access to Plan tab
 			m.switchToMode(LeftPaneModePlan)
 			return m, nil
-		case "m":
+		case m.config.Keys.ToggleMinimap:
 			m.showMinimap = !m.showMinimap
 			m.updateViewportSize()
 			m.diffViewport.SetContent(m.renderRightPane())
 			return m, nil
-		case "c":
-			// Toggle chat panel (only if not in chat input mode)
-			if !m.chatActive {
-				return m.startChat()
+		case m.config.Keys.ToggleLeftPane:
+			m.hideLeftPane = !m.hideLeftPane
+			// Force right pane focus when left pane is hidden
+			if m.hideLeftPane {
+				m.activePane = PaneRight
 			}
-		}
-
-		// Handle chat mode keys
-		if m.chatActive {
-			return m.handleChatKeys(msg)
+			m.updateViewportSize()
+			m.diffViewport.SetContent(m.renderRightPane())
+			return m, nil
+		case m.config.Keys.ToggleChat:
+			return m.startChat()
 		}
 
 		// Mode-specific key handling
@@ -512,6 +586,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		logger.Log("Plan generate error: %v", msg.err)
 		m.planGenerating = false
 		m.addToast("Plan generation failed: "+msg.err.Error(), ToastError)
+
+	case planEditedMsg:
+		logger.Log("Plan edited, reloading")
+		m.loadPlanFile()
+		m.diffViewport.SetContent(m.renderRightPane())
+		m.addToast("Plan reloaded", ToastInfo)
+
+	case leaderTimeoutMsg:
+		// Only dismiss if this timeout matches current activation
+		if m.leaderActive && msg.activatedAt.Equal(m.leaderActivatedAt) {
+			logger.Log("Leader mode timed out")
+			m.leaderActive = false
+		}
+
+	case chatCompletedMsg:
+		// Objective-based chat completed - auto-close
+		logger.Log("Chat objective completed")
+		m.stopChat()
+		m.addToast("Objective completed", ToastSuccess)
+
+	case chatOutputMsg:
+		// New output from chat - continue listening for more
+		logger.Log("Received chat output: %d bytes", len(msg.output))
+		if m.chatActive && m.chat != nil {
+			return m, m.waitForChatOutput()
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -519,8 +619,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleHistoryKeys handles key events in history mode
 func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "j", "down":
+	key := msg.String()
+	switch key {
+	case m.config.Keys.Down, "down":
 		if m.activePane == PaneLeft {
 			// Navigate history
 			if len(m.changes) > 0 && m.selectedIndex < len(m.changes)-1 {
@@ -533,7 +634,7 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.diffViewport.LineDown(1)
 		}
-	case "k", "up":
+	case m.config.Keys.Up, "up":
 		if m.activePane == PaneLeft {
 			// Navigate history
 			if len(m.changes) > 0 && m.selectedIndex > 0 {
@@ -546,7 +647,7 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.diffViewport.LineUp(1)
 		}
-	case "n":
+	case m.config.Keys.Next:
 		// Next change in queue
 		if len(m.changes) > 0 && m.selectedIndex < len(m.changes)-1 {
 			m.selectedIndex++
@@ -555,7 +656,7 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scrollToChange()
 			m.preloadAdjacent()
 		}
-	case "p":
+	case m.config.Keys.Prev:
 		// Previous change in queue
 		if len(m.changes) > 0 && m.selectedIndex > 0 {
 			m.selectedIndex--
@@ -564,7 +665,7 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scrollToChange()
 			m.preloadAdjacent()
 		}
-	case "left":
+	case m.config.Keys.ScrollLeft:
 		if m.scrollX > 0 {
 			m.scrollX -= 4
 			if m.scrollX < 0 {
@@ -572,10 +673,10 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.diffViewport.SetContent(m.renderDiff())
 		}
-	case "right":
+	case m.config.Keys.ScrollRight:
 		m.scrollX += 4
 		m.diffViewport.SetContent(m.renderDiff())
-	case "c":
+	case m.config.Keys.ClearHistory:
 		m.changes = []Change{}
 		m.selectedIndex = 0
 		m.diffViewport.SetContent("")
@@ -585,7 +686,7 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				logger.Log("Failed to clear history file: %v", err)
 			}
 		}
-	case "ctrl+g":
+	case m.config.Keys.OpenInNvim:
 		if len(m.changes) > 0 {
 			change := m.changes[m.selectedIndex]
 			cmd := exec.Command("nvim", fmt.Sprintf("+%d", change.LineNum), change.FilePath)
@@ -593,7 +694,7 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return nil
 			})
 		}
-	case "ctrl+o":
+	case m.config.Keys.OpenNvimCwd:
 		if len(m.changes) > 0 {
 			change := m.changes[m.selectedIndex]
 			cmd := exec.Command("nvim", change.FilePath)
@@ -607,25 +708,27 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handlePromptsKeys handles key events in prompts mode
 func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
 	// Version view mode has different key bindings
 	if m.promptShowVersions {
-		switch msg.String() {
-		case "V", "shift+v", "esc":
+		switch key {
+		case m.config.Keys.ViewVersions, "shift+v", "esc":
 			// Exit version view, back to prompt list
 			m.promptShowVersions = false
 			m.promptVersionSelected = 0
 			m.diffViewport.SetContent(m.renderRightPane())
-		case "j", "down":
+		case m.config.Keys.Down, "down":
 			if m.promptVersionSelected < len(m.promptVersions)-1 {
 				m.promptVersionSelected++
 				m.diffViewport.SetContent(m.renderRightPane())
 			}
-		case "k", "up":
+		case m.config.Keys.Up, "up":
 			if m.promptVersionSelected > 0 {
 				m.promptVersionSelected--
 				m.diffViewport.SetContent(m.renderRightPane())
 			}
-		case "r", "enter":
+		case m.config.Keys.RevertVersion, m.config.Keys.SendPrompt:
 			// Revert to selected version
 			if len(m.promptVersions) > 0 && len(m.promptList) > 0 && m.promptStore != nil {
 				v := m.promptVersions[m.promptVersionSelected]
@@ -639,7 +742,7 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.diffViewport.SetContent(m.renderRightPane())
 				}
 			}
-		case "ctrl+d":
+		case m.config.Keys.DeletePrompt:
 			// Delete version file
 			if len(m.promptVersions) > 0 {
 				v := m.promptVersions[m.promptVersionSelected]
@@ -657,7 +760,7 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.diffViewport.SetContent(m.renderRightPane())
 				}
 			}
-		case "e":
+		case m.config.Keys.EditPrompt:
 			// Open version in editor (read-only view)
 			if len(m.promptVersions) > 0 {
 				v := m.promptVersions[m.promptVersionSelected]
@@ -671,39 +774,39 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Normal prompt list mode
-	switch msg.String() {
-	case "j", "down":
+	switch key {
+	case m.config.Keys.Down, "down":
 		if m.activePane == PaneLeft && m.promptSelected < len(m.promptList)-1 {
 			m.promptSelected++
 			m.diffViewport.SetContent(m.renderRightPane())
 		} else if m.activePane == PaneRight {
 			m.diffViewport.LineDown(1)
 		}
-	case "k", "up":
+	case m.config.Keys.Up, "up":
 		if m.activePane == PaneLeft && m.promptSelected > 0 {
 			m.promptSelected--
 			m.diffViewport.SetContent(m.renderRightPane())
 		} else if m.activePane == PaneRight {
 			m.diffViewport.LineUp(1)
 		}
-	case "n":
+	case m.config.Keys.NewPrompt:
 		// New project-local prompt - open nvim with template
 		return m.createNewPrompt(false)
-	case "N":
+	case m.config.Keys.NewGlobalPrompt:
 		// New global prompt - open nvim with template
 		return m.createNewPrompt(true)
-	case "e":
+	case m.config.Keys.EditPrompt:
 		// Edit selected prompt
 		if len(m.promptList) > 0 {
 			return m.editPrompt(m.promptList[m.promptSelected])
 		}
-	case "r":
+	case m.config.Keys.RefinePrompt:
 		// Refine prompt with Claude
 		if len(m.promptList) > 0 && !m.promptRefining {
 			m.addToast("Refining with Claude...", ToastInfo)
 			return m.refinePrompt(m.promptList[m.promptSelected])
 		}
-	case "v":
+	case m.config.Keys.CreateVersion:
 		// Create version backup
 		logger.Log("Version key pressed: promptList=%d, promptStore=%v", len(m.promptList), m.promptStore != nil)
 		if len(m.promptList) > 0 && m.promptStore != nil {
@@ -721,7 +824,7 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			logger.Log("Version skipped: no prompts or no store")
 		}
-	case "V", "shift+v":
+	case m.config.Keys.ViewVersions, "shift+v":
 		// Enter version view mode
 		if len(m.promptList) > 0 && m.promptStore != nil {
 			m.loadVersionList()
@@ -733,7 +836,7 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.addToast("No versions found", ToastWarning)
 			}
 		}
-	case "ctrl+d":
+	case m.config.Keys.DeletePrompt:
 		// Delete prompt
 		if len(m.promptList) > 0 && m.promptStore != nil {
 			p := m.promptList[m.promptSelected]
@@ -748,7 +851,7 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.diffViewport.SetContent(m.renderRightPane())
 			}
 		}
-	case "enter":
+	case m.config.Keys.SendPrompt:
 		// Inject prompt using current method
 		if len(m.promptList) > 0 {
 			p := m.promptList[m.promptSelected]
@@ -760,7 +863,7 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.addToast(fmt.Sprintf("Sent via %s", prompt.MethodName(m.promptInjectMethod)), ToastSuccess)
 			}
 		}
-	case "y":
+	case m.config.Keys.YankPrompt:
 		// Yank/copy to clipboard only
 		if len(m.promptList) > 0 {
 			p := m.promptList[m.promptSelected]
@@ -771,7 +874,7 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.addToast("Copied to clipboard", ToastSuccess)
 			}
 		}
-	case "i":
+	case m.config.Keys.InjectMethod:
 		// Cycle injection method
 		m.promptInjectMethod = (m.promptInjectMethod + 1) % 3
 		m.addToast(fmt.Sprintf("Inject method: %s", prompt.MethodName(m.promptInjectMethod)), ToastInfo)
@@ -781,16 +884,17 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleRalphKeys handles key events in Ralph mode
 func (m Model) handleRalphKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "j", "down":
+	key := msg.String()
+	switch key {
+	case m.config.Keys.Down, "down":
 		if m.activePane == PaneRight {
 			m.diffViewport.LineDown(1)
 		}
-	case "k", "up":
+	case m.config.Keys.Up, "up":
 		if m.activePane == PaneRight {
 			m.diffViewport.LineUp(1)
 		}
-	case "C":
+	case m.config.Keys.CancelRalph:
 		// Cancel Ralph loop
 		if m.ralphState != nil && m.ralphState.Active {
 			if removed, _ := ralph.CancelLoop(); removed {
@@ -799,7 +903,7 @@ func (m Model) handleRalphKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.diffViewport.SetContent(m.renderRightPane())
 			}
 		}
-	case "r":
+	case m.config.Keys.Refresh:
 		// Refresh Ralph state
 		m.loadRalphState()
 		m.diffViewport.SetContent(m.renderRightPane())
@@ -837,30 +941,30 @@ func (m Model) handlePlanKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
-	case "j", "down":
+	case m.config.Keys.Down, "down":
 		if m.activePane == PaneRight {
 			m.diffViewport.LineDown(1)
 		}
-	case "k", "up":
+	case m.config.Keys.Up, "up":
 		if m.activePane == PaneRight {
 			m.diffViewport.LineUp(1)
 		}
-	case "d":
+	case m.config.Keys.PageDown:
 		if m.activePane == PaneRight {
 			m.diffViewport.HalfViewDown()
 		}
-	case "u":
+	case m.config.Keys.PageUp:
 		if m.activePane == PaneRight {
 			m.diffViewport.HalfViewUp()
 		}
-	case "G":
+	case m.config.Keys.GeneratePlan:
 		// Generate new plan
 		if !m.planGenerating {
 			m.planInputActive = true
 			m.planInput.Focus()
 			return m, textinput.Blink
 		}
-	case "e":
+	case m.config.Keys.EditPlan:
 		// Edit plan in nvim
 		if m.planPath != "" {
 			cmd := exec.Command("nvim", m.planPath)
@@ -868,7 +972,7 @@ func (m Model) handlePlanKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return nil
 			})
 		}
-	case "r":
+	case m.config.Keys.Refresh:
 		// Refresh plan
 		m.loadPlanFile()
 		m.diffViewport.SetContent(m.renderRightPane())
@@ -902,19 +1006,107 @@ func (m *Model) startChat() (Model, tea.Cmd) {
 		return *m, nil
 	}
 
-	// Start the chat subprocess
+	// Start the chat subprocess (fresh session, doesn't pollute main chat)
 	if err := m.chat.Start(mcpConfigPath); err != nil {
 		m.addToast("Failed to start chat: "+err.Error(), ToastError)
 		m.chatActive = false
 		return *m, nil
 	}
 
+	// Set PTY size based on overlay dimensions (80% of screen)
+	rows := int(float64(m.height) * 0.8)
+	cols := int(float64(m.width) * 0.8)
+	if rows < 24 {
+		rows = 24
+	}
+	if cols < 80 {
+		cols = 80
+	}
+	m.chat.SetSize(rows, cols)
+
 	// Focus the chat input
 	m.chatInput.Focus()
-	m.addToast("Chat started", ToastInfo)
+	m.addToast("Chat started (isolated session)", ToastInfo)
+	logger.Log("Chat started in interactive mode, listening for output")
 
-	// Return with blink command for the input
-	return *m, textinput.Blink
+	// Return with blink command and start listening for output
+	return *m, tea.Batch(textinput.Blink, m.waitForChatOutput())
+}
+
+// startChatWithObjective starts chat in objective mode (like Ralph)
+// The chat will auto-close when the objective is completed
+func (m *Model) startChatWithObjective(objective string) (Model, tea.Cmd) {
+	m.chatActive = true
+	m.chat = chat.New()
+
+	// Write MCP config for chat
+	mcpConfigPath, err := plan.WriteMCPConfig()
+	if err != nil {
+		m.addToast("Failed to write MCP config: "+err.Error(), ToastError)
+		m.chatActive = false
+		return *m, nil
+	}
+
+	// Start chat with objective (non-interactive, auto-completes)
+	if err := m.chat.StartWithObjective(objective, mcpConfigPath); err != nil {
+		m.addToast("Failed to start objective chat: "+err.Error(), ToastError)
+		m.chatActive = false
+		return *m, nil
+	}
+
+	// Set PTY size based on overlay dimensions (80% of screen)
+	rows := int(float64(m.height) * 0.8)
+	cols := int(float64(m.width) * 0.8)
+	if rows < 24 {
+		rows = 24
+	}
+	if cols < 80 {
+		cols = 80
+	}
+	m.chat.SetSize(rows, cols)
+
+	m.addToast("Running objective...", ToastInfo)
+	logger.Log("Chat started in objective mode: %s", objective)
+
+	// Start listening for both output and completion
+	return *m, tea.Batch(m.waitForChatOutput(), m.waitForChatCompletion())
+}
+
+// chatCompletedMsg signals that objective-based chat has completed
+type chatCompletedMsg struct{}
+
+// chatOutputMsg signals new output from chat
+type chatOutputMsg struct {
+	output string
+}
+
+// waitForChatCompletion returns a command that waits for chat completion
+func (m *Model) waitForChatCompletion() tea.Cmd {
+	return func() tea.Msg {
+		if m.chat == nil {
+			return nil
+		}
+		<-m.chat.CompletedChan()
+		return chatCompletedMsg{}
+	}
+}
+
+// waitForChatOutput returns a command that waits for chat output
+func (m *Model) waitForChatOutput() tea.Cmd {
+	return func() tea.Msg {
+		if m.chat == nil {
+			return nil
+		}
+		select {
+		case output, ok := <-m.chat.OutputChan():
+			if !ok {
+				return nil // Channel closed
+			}
+			return chatOutputMsg{output: output}
+		case <-m.chat.DoneChan():
+			return nil // Chat ended
+		}
+	}
 }
 
 // stopChat stops the chat session
@@ -931,21 +1123,21 @@ func (m *Model) stopChat() {
 // handleChatKeys handles key events when chat is active
 func (m Model) handleChatKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc":
+	case m.config.Keys.CloseChat:
 		// Close chat
 		m.stopChat()
 		return m, nil
-	case "ctrl+c":
+	case m.config.Keys.KillChat:
 		// Kill chat and close
 		m.stopChat()
 		return m, nil
-	case "ctrl+l":
+	case m.config.Keys.ClearChat:
 		// Clear chat output
 		if m.chat != nil {
 			m.chat.ClearOutput()
 		}
 		return m, nil
-	case "enter":
+	case m.config.Keys.SendChat:
 		// Send message
 		input := m.chatInput.Value()
 		if input != "" && m.chat != nil {
@@ -961,6 +1153,254 @@ func (m Model) handleChatKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.chatInput, cmd = m.chatInput.Update(msg)
 		return m, cmd
 	}
+}
+
+// handleLeaderKey handles context-sensitive key actions when leader mode is active
+func (m Model) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
+	// Escape cancels leader mode
+	if key == "esc" {
+		m.leaderActive = false
+		return m, nil
+	}
+
+	// Always exit leader mode after action
+	defer func() { m.leaderActive = false }()
+
+	// Global actions (available in any context)
+	switch key {
+	case "q":
+		return m, tea.Quit
+	case "?":
+		m.showHelp = true
+		return m, nil
+	case "h":
+		m.hideLeftPane = !m.hideLeftPane
+		if m.hideLeftPane {
+			m.activePane = PaneRight
+		}
+		m.updateViewportSize()
+		m.diffViewport.SetContent(m.renderRightPane())
+		return m, nil
+	case "m":
+		m.showMinimap = !m.showMinimap
+		m.updateViewportSize()
+		m.diffViewport.SetContent(m.renderRightPane())
+		return m, nil
+	case "c":
+		if !m.chatActive {
+			return m.startChat()
+		}
+		return m, nil
+	case "1":
+		m.switchToMode(LeftPaneModeHistory)
+		return m, nil
+	case "2":
+		m.switchToMode(LeftPaneModePrompts)
+		return m, nil
+	case "3":
+		m.switchToMode(LeftPaneModeRalph)
+		return m, nil
+	case "4":
+		m.switchToMode(LeftPaneModePlan)
+		return m, nil
+	}
+
+	// Context-sensitive actions based on pane and mode
+	if m.activePane == PaneRight {
+		return m.handleLeaderKeyRightPane(key)
+	}
+
+	// Left pane - mode-specific
+	switch m.leftPaneMode {
+	case LeftPaneModeHistory:
+		return m.handleLeaderKeyHistory(key)
+	case LeftPaneModePrompts:
+		return m.handleLeaderKeyPrompts(key)
+	case LeftPaneModeRalph:
+		return m.handleLeaderKeyRalph(key)
+	case LeftPaneModePlan:
+		return m.handleLeaderKeyPlan(key)
+	}
+
+	return m, nil
+}
+
+// handleLeaderKeyRightPane handles leader keys when right pane is focused
+func (m Model) handleLeaderKeyRightPane(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "g": // Open in nvim at line
+		if len(m.changes) > 0 {
+			change := m.changes[m.selectedIndex]
+			cmd := exec.Command("nvim", fmt.Sprintf("+%d", change.LineNum), change.FilePath)
+			return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return nil })
+		}
+	case "o": // Open in nvim (file only)
+		if len(m.changes) > 0 {
+			change := m.changes[m.selectedIndex]
+			cmd := exec.Command("nvim", change.FilePath)
+			return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return nil })
+		}
+	}
+	return m, nil
+}
+
+// handleLeaderKeyHistory handles leader keys in history mode
+func (m Model) handleLeaderKeyHistory(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "g": // Open in nvim at line
+		if len(m.changes) > 0 {
+			change := m.changes[m.selectedIndex]
+			cmd := exec.Command("nvim", fmt.Sprintf("+%d", change.LineNum), change.FilePath)
+			return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return nil })
+		}
+	case "o": // Open in nvim (file only)
+		if len(m.changes) > 0 {
+			change := m.changes[m.selectedIndex]
+			cmd := exec.Command("nvim", change.FilePath)
+			return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return nil })
+		}
+	case "x": // Clear history
+		m.changes = nil
+		m.selectedIndex = 0
+		m.diffViewport.SetContent(m.renderRightPane())
+		m.addToast("History cleared", ToastInfo)
+	}
+	return m, nil
+}
+
+// handleLeaderKeyPrompts handles leader keys in prompts mode
+func (m Model) handleLeaderKeyPrompts(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "n": // New prompt
+		return m.createNewPrompt(false)
+	case "N": // New global prompt
+		return m.createNewPrompt(true)
+	case "e": // Edit prompt
+		if len(m.promptList) > 0 {
+			return m.editPrompt(m.promptList[m.promptSelected])
+		}
+	case "r": // Refine prompt
+		if len(m.promptList) > 0 && !m.promptRefining {
+			m.addToast("Refining with Claude...", ToastInfo)
+			return m.refinePrompt(m.promptList[m.promptSelected])
+		}
+	case "y": // Yank prompt
+		if len(m.promptList) > 0 {
+			p := m.promptList[m.promptSelected]
+			expanded := m.expandPromptVariables(p.Content)
+			if err := prompt.Inject(expanded, prompt.InjectClipboard); err != nil {
+				m.addToast("Failed to copy", ToastError)
+			} else {
+				m.addToast("Copied to clipboard", ToastSuccess)
+			}
+		}
+	case "d": // Delete prompt
+		if len(m.promptList) > 0 && m.promptStore != nil {
+			p := m.promptList[m.promptSelected]
+			if err := m.promptStore.Delete(p.Path); err != nil {
+				m.addToast(err.Error(), ToastError)
+			} else {
+				m.addToast("Deleted "+p.Name, ToastSuccess)
+				m.refreshPromptList()
+				if m.promptSelected >= len(m.promptList) && m.promptSelected > 0 {
+					m.promptSelected--
+				}
+				m.diffViewport.SetContent(m.renderRightPane())
+			}
+		}
+	case "v": // Create version
+		if len(m.promptList) > 0 && m.promptStore != nil {
+			p := m.promptList[m.promptSelected]
+			if err := m.promptStore.CreateVersion(&p); err != nil {
+				m.addToast(err.Error(), ToastError)
+			} else {
+				m.addToast(fmt.Sprintf("Created v%d backup", p.Version), ToastSuccess)
+				m.refreshPromptList()
+				m.diffViewport.SetContent(m.renderRightPane())
+			}
+		}
+	case "V": // View versions
+		if len(m.promptList) > 0 && m.promptStore != nil {
+			m.loadVersionList()
+			if len(m.promptVersions) > 0 {
+				m.promptShowVersions = true
+				m.promptVersionSelected = 0
+				m.diffViewport.SetContent(m.renderRightPane())
+			} else {
+				m.addToast("No versions found", ToastWarning)
+			}
+		}
+	case "i": // Cycle inject method
+		m.promptInjectMethod = (m.promptInjectMethod + 1) % 3
+		m.addToast(fmt.Sprintf("Method: %s", prompt.MethodName(m.promptInjectMethod)), ToastInfo)
+	case "enter": // Send prompt (via inject method)
+		if len(m.promptList) > 0 {
+			p := m.promptList[m.promptSelected]
+			expanded := m.expandPromptVariables(p.Content)
+			if err := prompt.Inject(expanded, m.promptInjectMethod); err != nil {
+				m.addToast("Failed to inject", ToastError)
+			} else {
+				m.addToast(fmt.Sprintf("Sent via %s", prompt.MethodName(m.promptInjectMethod)), ToastSuccess)
+			}
+		}
+	case "s": // Start as objective (like Ralph - auto-completes)
+		if len(m.promptList) > 0 {
+			p := m.promptList[m.promptSelected]
+			expanded := m.expandPromptVariables(p.Content)
+			return m.startChatWithObjective(expanded)
+		}
+	}
+	return m, nil
+}
+
+// handleLeaderKeyRalph handles leader keys in ralph mode
+func (m Model) handleLeaderKeyRalph(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "C": // Cancel ralph
+		if _, err := ralph.CancelLoop(); err != nil {
+			m.addToast(err.Error(), ToastError)
+		} else {
+			m.addToast("Ralph cancelled", ToastSuccess)
+			m.loadRalphState()
+		}
+	case "r": // Refresh
+		m.loadRalphState()
+		m.diffViewport.SetContent(m.renderRightPane())
+		m.addToast("Refreshed", ToastInfo)
+	}
+	return m, nil
+}
+
+// handleLeaderKeyPlan handles leader keys in plan mode
+func (m Model) handleLeaderKeyPlan(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "G": // Generate plan - activate input mode
+		m.planInputActive = true
+		m.planInput.Focus()
+		m.addToast("Enter plan description", ToastInfo)
+	case "e": // Edit plan
+		if m.planPath != "" {
+			cmd := exec.Command("nvim", m.planPath)
+			return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+				return planEditedMsg{}
+			})
+		}
+	case "r": // Refresh
+		m.loadPlanFile()
+		m.diffViewport.SetContent(m.renderRightPane())
+		m.addToast("Refreshed", ToastInfo)
+	case "s": // Start/execute plan as objective (like Ralph)
+		if m.planPath != "" && m.planContent != "" {
+			// Use plan content as objective
+			objective := fmt.Sprintf("Execute this plan:\n\n%s", m.planContent)
+			return m.startChatWithObjective(objective)
+		} else {
+			m.addToast("No plan loaded", ToastWarning)
+		}
+	}
+	return m, nil
 }
 
 // renderChatPane renders the chat interface
@@ -999,6 +1439,122 @@ func (m *Model) renderChatPane() string {
 	sb.WriteString(m.theme.Dim.Render("Enter:send  Esc:close  ^L:clear"))
 
 	return sb.String()
+}
+
+// overlayChatPanel renders a chat panel overlay taking 80% of the screen
+func (m Model) overlayChatPanel(mainView string) string {
+	// Calculate overlay dimensions (80% of screen)
+	overlayWidth := int(float64(m.width) * 0.8)
+	overlayHeight := int(float64(m.height) * 0.8)
+
+	// Ensure minimum sizes
+	if overlayWidth < 40 {
+		overlayWidth = 40
+	}
+	if overlayHeight < 10 {
+		overlayHeight = 10
+	}
+
+	// Build chat content
+	var chatContent strings.Builder
+
+	// Header with mode indicator
+	if m.chat != nil && m.chat.IsObjectiveMode() {
+		chatContent.WriteString(m.theme.Title.Render("⚡ Running Objective") + "\n")
+		chatContent.WriteString(m.theme.Dim.Render(strings.Repeat("─", overlayWidth-6)) + "\n")
+		// Show truncated objective
+		obj := m.chat.Objective()
+		if len(obj) > overlayWidth-10 {
+			obj = obj[:overlayWidth-13] + "..."
+		}
+		chatContent.WriteString(m.theme.Dim.Render("» "+obj) + "\n\n")
+	} else {
+		chatContent.WriteString(m.theme.Title.Render("Claude Chat") + "\n")
+		chatContent.WriteString(m.theme.Dim.Render(strings.Repeat("─", overlayWidth-6)) + "\n\n")
+	}
+
+	// Chat output
+	if m.chat != nil {
+		output := m.chat.Output()
+		if output == "" {
+			chatContent.WriteString(m.theme.Dim.Render("Waiting for response...") + "\n")
+		} else {
+			// Show last N lines that fit
+			lines := strings.Split(output, "\n")
+			maxLines := overlayHeight - 8 // Reserve space for header, input, hints
+			if maxLines < 5 {
+				maxLines = 5
+			}
+			if len(lines) > maxLines {
+				lines = lines[len(lines)-maxLines:]
+			}
+			for _, line := range lines {
+				// Truncate long lines
+				if lipgloss.Width(line) > overlayWidth-6 {
+					line = lipgloss.NewStyle().MaxWidth(overlayWidth - 6).Render(line)
+				}
+				chatContent.WriteString(line + "\n")
+			}
+		}
+	}
+
+	// Input area (only in interactive mode)
+	if m.chat == nil || !m.chat.IsObjectiveMode() {
+		chatContent.WriteString("\n" + m.theme.Dim.Render(strings.Repeat("─", overlayWidth-6)) + "\n")
+		chatContent.WriteString(m.chatInput.View() + "\n")
+		chatContent.WriteString(m.theme.Dim.Render("Enter:send  Esc:close  ^L:clear"))
+	} else {
+		chatContent.WriteString("\n" + m.theme.Dim.Render(strings.Repeat("─", overlayWidth-6)) + "\n")
+		chatContent.WriteString(m.theme.Dim.Render("Running... (Esc to cancel)"))
+	}
+
+	// Style the overlay box
+	overlayBox := lipgloss.NewStyle().
+		Width(overlayWidth-2).
+		Height(overlayHeight-2).
+		Background(lipgloss.Color("#0d0d1a")).
+		Foreground(lipgloss.Color("#e0e0e0")).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#5a5a8a")).
+		Padding(1, 2).
+		Render(chatContent.String())
+
+	// Calculate position to center the overlay
+	startX := (m.width - overlayWidth) / 2
+	startY := (m.height - overlayHeight) / 2
+	if startX < 0 {
+		startX = 0
+	}
+	if startY < 0 {
+		startY = 0
+	}
+
+	// Split main view into lines and overlay the chat panel
+	lines := strings.Split(mainView, "\n")
+	overlayLines := strings.Split(overlayBox, "\n")
+
+	for i, overlayLine := range overlayLines {
+		lineIdx := startY + i
+		if lineIdx >= 0 && lineIdx < len(lines) {
+			mainLine := lines[lineIdx]
+
+			// Build the new line: left padding + overlay + rest of line (dimmed)
+			if startX > 0 {
+				// Keep left portion
+				leftPart := ""
+				if lipgloss.Width(mainLine) > startX {
+					leftPart = lipgloss.NewStyle().MaxWidth(startX).Render(mainLine)
+				} else {
+					leftPart = mainLine + strings.Repeat(" ", startX-lipgloss.Width(mainLine))
+				}
+				lines[lineIdx] = leftPart + overlayLine
+			} else {
+				lines[lineIdx] = overlayLine
+			}
+		}
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // cycleMode cycles through the available modes
@@ -1240,30 +1796,15 @@ func (m Model) View() string {
 		minimapWidth = 2
 	}
 
-	leftWidth := m.width / 3
-	rightWidth := m.width - leftWidth - 3 - minimapWidth
-
-	// Render left pane based on current mode
-	var leftContent string
-	switch m.leftPaneMode {
-	case LeftPaneModePrompts:
-		leftContent = m.renderPromptsList()
-	case LeftPaneModeRalph:
-		leftContent = m.renderRalphStatus()
-	case LeftPaneModePlan:
-		leftContent = m.renderPlanList()
-	default:
-		leftContent = m.renderHistory()
+	// Calculate pane widths based on left pane visibility
+	var leftWidth, rightWidth int
+	if m.hideLeftPane {
+		leftWidth = 0
+		rightWidth = m.width - 2 - minimapWidth
+	} else {
+		leftWidth = m.width / 3
+		rightWidth = m.width - leftWidth - 3 - minimapWidth
 	}
-
-	leftBox := m.theme.Border
-	if m.activePane == PaneLeft {
-		leftBox = m.theme.ActiveBorder
-	}
-	leftPane := leftBox.
-		Width(leftWidth).
-		Height(m.height - 4).
-		Render(leftContent)
 
 	// Render right pane (diff or prompt preview)
 	rightContent := m.diffViewport.View()
@@ -1277,17 +1818,86 @@ func (m Model) View() string {
 		Render(rightContent)
 
 	var content string
-	if m.showMinimap {
-		content = lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane, minimapStr)
+	if m.hideLeftPane {
+		// Only right pane visible
+		if m.showMinimap {
+			content = lipgloss.JoinHorizontal(lipgloss.Top, rightPane, minimapStr)
+		} else {
+			content = rightPane
+		}
 	} else {
-		content = lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
+		// Both panes visible
+		var leftContent string
+		switch m.leftPaneMode {
+		case LeftPaneModePrompts:
+			leftContent = m.renderPromptsList()
+		case LeftPaneModeRalph:
+			leftContent = m.renderRalphStatus()
+		case LeftPaneModePlan:
+			leftContent = m.renderPlanList()
+		default:
+			leftContent = m.renderHistory()
+		}
+
+		leftBox := m.theme.Border
+		if m.activePane == PaneLeft {
+			leftBox = m.theme.ActiveBorder
+		}
+		leftPane := leftBox.
+			Width(leftWidth).
+			Height(m.height - 4).
+			Render(leftContent)
+
+		if m.showMinimap {
+			content = lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane, minimapStr)
+		} else {
+			content = lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
+		}
 	}
 
-	// Render status bar
+	// Always render status bar
 	status := m.renderStatus()
 
 	// Build main view
 	mainView := lipgloss.JoinVertical(lipgloss.Left, header, content, status)
+
+	// Overlay chat panel (80% of screen) when chat is active
+	if m.chatActive {
+		mainView = m.overlayChatPanel(mainView)
+	}
+
+	// Overlay which-key popup at bottom-center when leader is active
+	if m.leaderActive {
+		whichKeyView := m.renderWhichKey()
+		whichKeyWidth := lipgloss.Width(whichKeyView)
+		whichKeyLines := strings.Split(whichKeyView, "\n")
+
+		// Split main view into lines
+		lines := strings.Split(mainView, "\n")
+
+		// Position which-key popup 2 lines from bottom (above status bar), centered
+		startLineIdx := len(lines) - 2 - len(whichKeyLines)
+		if startLineIdx < 0 {
+			startLineIdx = 0
+		}
+
+		// Center horizontally
+		targetPos := (m.width - whichKeyWidth) / 2
+		if targetPos < 0 {
+			targetPos = 0
+		}
+
+		// Replace lines with centered popup content
+		for i, popupLine := range whichKeyLines {
+			lineIdx := startLineIdx + i
+			if lineIdx >= 0 && lineIdx < len(lines) {
+				// Create centered line: padding + popup line
+				padding := strings.Repeat(" ", targetPos)
+				lines[lineIdx] = padding + popupLine
+			}
+		}
+		mainView = strings.Join(lines, "\n")
+	}
 
 	// Overlay toasts in top-right corner
 	if len(m.toasts) > 0 {
@@ -1859,9 +2469,14 @@ func (m *Model) updateViewportSize() {
 		minimapWidth = 2
 	}
 
-	// Always two-pane layout
-	leftWidth := m.width / 3
-	vpWidth := m.width - leftWidth - 6 - minimapWidth
+	// Calculate viewport width based on left pane visibility
+	var vpWidth int
+	if m.hideLeftPane {
+		vpWidth = m.width - 4 - minimapWidth
+	} else {
+		leftWidth := m.width / 3
+		vpWidth = m.width - leftWidth - 6 - minimapWidth
+	}
 
 	m.diffViewport.Width = vpWidth
 	m.diffViewport.Height = m.height - headerHeight - footerHeight - 2
@@ -1938,125 +2553,293 @@ func (m Model) renderMinimap() string {
 }
 
 func (m Model) renderStatus() string {
+	k := m.config.Keys
+
 	// Chat mode has its own hints
 	if m.chatActive {
-		return m.theme.Status.Render("Enter:send  Esc:close  ^C:kill  ^L:clear")
+		return m.theme.Status.Render(fmt.Sprintf("%s:send  %s:close  %s:clear",
+			k.SendChat, k.CloseChat, k.ClearChat))
 	}
 
-	minimapKey := "m:map"
-	if m.showMinimap {
-		minimapKey = "m:map✓"
+	// Plan input mode
+	if m.planInputActive {
+		return m.theme.Status.Render("Enter:submit  Esc:cancel")
+	}
+	if m.planGenerating {
+		return m.theme.Status.Render("Generating plan...")
 	}
 
-	// Common tab navigation hints
-	tabHints := "Tab:next  [/]:pane  1-4:tabs  c:chat"
-
-	var keys string
+	// Simplified status bar - just nav + leader key hint
+	var modeName string
 	switch m.leftPaneMode {
+	case LeftPaneModeHistory:
+		modeName = "History"
 	case LeftPaneModePrompts:
-		if m.promptShowVersions {
-			// Version view mode hints
-			keys = fmt.Sprintf("j/k:nav  r/Enter:revert  e:view  ^D:del  V/esc:back  %s  ?:help  q:quit", tabHints)
-		} else {
-			// Prompts mode hints
-			methodName := prompt.MethodName(m.promptInjectMethod)
-			keys = fmt.Sprintf("j/k:nav  n:new  e:edit  r:refine  v:ver  V:versions  ^D:del  y:yank  i:(%s)  Enter:send  %s  ?:help  q:quit", methodName, tabHints)
-		}
+		modeName = "Prompts"
 	case LeftPaneModeRalph:
-		// Ralph mode hints
-		if m.ralphState != nil && m.ralphState.Active {
-			keys = fmt.Sprintf("j/k:scroll  C:cancel  r:refresh  %s  ?:help  q:quit", tabHints)
-		} else {
-			keys = fmt.Sprintf("r:refresh  %s  ?:help  q:quit", tabHints)
-		}
+		modeName = "Ralph"
 	case LeftPaneModePlan:
-		// Plan mode hints
-		if m.planInputActive {
-			keys = "Enter:submit  Esc:cancel"
-		} else if m.planGenerating {
-			keys = "Generating plan..."
-		} else if m.planPath != "" {
-			keys = fmt.Sprintf("j/k:scroll  d/u:page  G:new  e:edit  r:refresh  %s  ?:help  q:quit", tabHints)
-		} else {
-			keys = fmt.Sprintf("G:generate  r:refresh  %s  ?:help  q:quit", tabHints)
-		}
-	default:
-		// History mode hints
-		keys = fmt.Sprintf("n/p:nav  ←→:scroll  %s  ^G:nvim  c:clear  %s  ?:help  q:quit", minimapKey, tabHints)
+		modeName = "Plan"
 	}
-	return m.theme.Status.Render(keys)
+
+	paneIndicator := "L"
+	if m.activePane == PaneRight {
+		paneIndicator = "R"
+	}
+
+	// Show: mode, pane, navigation, and leader key
+	return m.theme.Status.Render(fmt.Sprintf(
+		"%s [%s]  %s/%s:nav  Tab:mode  [/]:pane  ^G:menu",
+		modeName, paneIndicator, k.Down, k.Up))
 }
 
 func (m Model) renderHelp() string {
-	help := `
-  Claude Follow TUI - Help
+	k := m.config.Keys
+	var help strings.Builder
 
-  Tab Navigation:
-    Tab          Cycle to next tab
-    Shift+Tab    Cycle to previous tab
-    1            History tab
-    2            Prompts tab
-    3            Ralph tab
-    4            Plan tab
-    [ / ]        Switch left/right pane focus
+	help.WriteString("\n  Claude Follow TUI - Help\n\n")
 
-  History Tab:
-    n/p          Next/previous change
-    j/k          Scroll diff
-    ←/→          Scroll horizontally
-    m            Toggle minimap
-    Ctrl+G       Open file in nvim at line
-    Ctrl+O       Open file in nvim
-    c            Clear history
+	// Global section (always shown)
+	help.WriteString("  === Global ===\n")
+	help.WriteString(fmt.Sprintf("    %-14s Cycle tabs\n", k.NextTab+"/"+k.PrevTab))
+	help.WriteString("    1-4            Direct tab access\n")
+	if !m.hideLeftPane {
+		help.WriteString(fmt.Sprintf("    %-14s Switch pane focus\n", k.LeftPane+" / "+k.RightPane))
+	}
+	help.WriteString(fmt.Sprintf("    %-14s Toggle left pane\n", k.ToggleLeftPane))
+	help.WriteString(fmt.Sprintf("    %-14s Toggle minimap\n", k.ToggleMinimap))
+	help.WriteString(fmt.Sprintf("    %-14s Toggle chat\n", k.ToggleChat))
+	help.WriteString(fmt.Sprintf("    %-14s This help\n", k.Help))
+	help.WriteString(fmt.Sprintf("    %-14s Quit\n\n", k.Quit))
 
-  Prompts Tab:
-    n            New prompt
-    e            Edit selected prompt
-    r            Refine with Claude CLI
-    v            Create version backup
-    V            View all versions
-    Ctrl+d       Delete prompt
-    y            Yank (copy to clipboard)
-    i            Cycle inject method
-    Enter        Inject prompt
+	// Mode-specific section
+	switch m.leftPaneMode {
+	case LeftPaneModeHistory:
+		help.WriteString("  === History Mode ===\n")
+		help.WriteString(fmt.Sprintf("    %-14s Next/previous change\n", k.Next+"/"+k.Prev))
+		help.WriteString(fmt.Sprintf("    %-14s Scroll diff\n", k.Down+"/"+k.Up))
+		help.WriteString(fmt.Sprintf("    %-14s Scroll horizontally\n", k.ScrollLeft+"/"+k.ScrollRight))
+		help.WriteString(fmt.Sprintf("    %-14s Open file in nvim at line\n", k.OpenInNvim))
+		help.WriteString(fmt.Sprintf("    %-14s Open file in nvim\n", k.OpenNvimCwd))
+		help.WriteString(fmt.Sprintf("    %-14s Clear history\n\n", k.ClearHistory))
 
-  Version View:
-    j/k          Navigate versions
-    r/Enter      Revert to version
-    e            View version (read-only)
-    Ctrl+d       Delete version
-    V/esc        Back to prompts
+	case LeftPaneModePrompts:
+		if m.promptShowVersions {
+			help.WriteString("  === Version View ===\n")
+			help.WriteString(fmt.Sprintf("    %-14s Navigate versions\n", k.Down+"/"+k.Up))
+			help.WriteString(fmt.Sprintf("    %-14s Revert to version\n", k.RevertVersion+"/"+k.SendPrompt))
+			help.WriteString(fmt.Sprintf("    %-14s View version (read-only)\n", k.EditPrompt))
+			help.WriteString(fmt.Sprintf("    %-14s Delete version\n", k.DeletePrompt))
+			help.WriteString(fmt.Sprintf("    %-14s Back to prompts\n\n", k.ViewVersions+"/Esc"))
+		} else {
+			help.WriteString("  === Prompts Mode ===\n")
+			help.WriteString(fmt.Sprintf("    %-14s New project prompt\n", k.NewPrompt))
+			help.WriteString(fmt.Sprintf("    %-14s New global prompt\n", k.NewGlobalPrompt))
+			help.WriteString(fmt.Sprintf("    %-14s Edit selected prompt\n", k.EditPrompt))
+			help.WriteString(fmt.Sprintf("    %-14s Refine with Claude CLI\n", k.RefinePrompt))
+			help.WriteString(fmt.Sprintf("    %-14s Create version backup\n", k.CreateVersion))
+			help.WriteString(fmt.Sprintf("    %-14s View all versions\n", k.ViewVersions))
+			help.WriteString(fmt.Sprintf("    %-14s Delete prompt\n", k.DeletePrompt))
+			help.WriteString(fmt.Sprintf("    %-14s Yank (copy to clipboard)\n", k.YankPrompt))
+			help.WriteString(fmt.Sprintf("    %-14s Cycle inject method\n", k.InjectMethod))
+			help.WriteString(fmt.Sprintf("    %-14s Inject prompt\n\n", k.SendPrompt))
+		}
 
-  Ralph Tab:
-    C            Cancel Ralph loop
-    r            Refresh status
+	case LeftPaneModeRalph:
+		help.WriteString("  === Ralph Mode ===\n")
+		if m.ralphState != nil && m.ralphState.Active {
+			help.WriteString(fmt.Sprintf("    %-14s Cancel Ralph loop\n", k.CancelRalph))
+		}
+		help.WriteString(fmt.Sprintf("    %-14s Refresh status\n", k.Refresh))
+		help.WriteString(fmt.Sprintf("    %-14s Scroll prompt\n\n", k.Down+"/"+k.Up))
 
-  Plan Tab:
-    G            Generate new plan
-    e            Edit plan in nvim
-    r            Refresh plan
-    d/u          Page down/up
+	case LeftPaneModePlan:
+		help.WriteString("  === Plan Mode ===\n")
+		help.WriteString(fmt.Sprintf("    %-14s Generate new plan\n", k.GeneratePlan))
+		if m.planPath != "" {
+			help.WriteString(fmt.Sprintf("    %-14s Edit plan in nvim\n", k.EditPlan))
+		}
+		help.WriteString(fmt.Sprintf("    %-14s Refresh plan\n", k.Refresh))
+		help.WriteString(fmt.Sprintf("    %-14s Scroll plan content\n\n", k.Down+"/"+k.Up+"/"+k.PageDown+"/"+k.PageUp))
+	}
 
-  Chat (press 'c' from any tab):
-    Enter        Send message
-    Esc          Close chat
-    Ctrl+C       Kill chat and close
-    Ctrl+L       Clear output
+	// Chat section (only if chat is active)
+	if m.chatActive {
+		help.WriteString("  === Chat ===\n")
+		help.WriteString(fmt.Sprintf("    %-14s Send message\n", k.SendChat))
+		help.WriteString(fmt.Sprintf("    %-14s Close chat\n", k.CloseChat))
+		help.WriteString(fmt.Sprintf("    %-14s Kill chat and close\n", k.KillChat))
+		help.WriteString(fmt.Sprintf("    %-14s Clear output\n\n", k.ClearChat))
+	}
 
-  Template Variables (in prompts):
-    {{plan}}       Plan file content
-    {{plan_name}}  Plan file name
-    {{file}}       Current file path
-    {{file_name}}  Current file name
-    {{project}}    Project directory name
-    {{cwd}}        Working directory
+	// Template variables (only in prompts mode)
+	if m.leftPaneMode == LeftPaneModePrompts && !m.promptShowVersions {
+		help.WriteString("  === Template Variables ===\n")
+		help.WriteString("    {{plan}}       Plan file content\n")
+		help.WriteString("    {{plan_name}}  Plan file name\n")
+		help.WriteString("    {{file}}       Current file path\n")
+		help.WriteString("    {{file_name}}  Current file name\n")
+		help.WriteString("    {{project}}    Project directory name\n")
+		help.WriteString("    {{cwd}}        Working directory\n\n")
+	}
 
-  ?            Show this help
-  q            Quit
+	help.WriteString("  Press any key to close help\n")
 
-  Press any key to close help
-`
-	return m.theme.Help.Render(help)
+	return m.theme.Help.Render(help.String())
+}
+
+// WhichKeyItem represents a single item in the which-key popup
+type WhichKeyItem struct {
+	Key         string
+	Description string
+	IsGroup     bool // true if this leads to another menu level
+}
+
+// renderWhichKey renders context-sensitive which-key popup as a floating box
+func (m Model) renderWhichKey() string {
+	var contextItems []WhichKeyItem
+
+	// Context-sensitive actions based on pane and mode (fuller descriptions)
+	var context string
+	if m.activePane == PaneRight {
+		context = "FILE VIEWER"
+		contextItems = []WhichKeyItem{
+			{Key: "g", Description: "open in nvim at line"},
+			{Key: "o", Description: "open file in nvim"},
+		}
+	} else {
+		switch m.leftPaneMode {
+		case LeftPaneModeHistory:
+			context = "HISTORY"
+			contextItems = []WhichKeyItem{
+				{Key: "g", Description: "open in nvim at line"},
+				{Key: "o", Description: "open file in nvim"},
+				{Key: "x", Description: "clear history"},
+			}
+		case LeftPaneModePrompts:
+			context = "PROMPTS"
+			contextItems = []WhichKeyItem{
+				{Key: "n", Description: "new prompt"},
+				{Key: "N", Description: "new global prompt"},
+				{Key: "e", Description: "edit selected"},
+				{Key: "r", Description: "refine with AI"},
+				{Key: "y", Description: "yank to clipboard"},
+				{Key: "d", Description: "delete prompt"},
+				{Key: "i", Description: "injection method"},
+				{Key: "⏎", Description: "inject prompt"},
+				{Key: "s", Description: "run as objective"},
+			}
+		case LeftPaneModeRalph:
+			context = "RALPH LOOP"
+			contextItems = []WhichKeyItem{
+				{Key: "C", Description: "cancel loop"},
+				{Key: "r", Description: "refresh status"},
+			}
+		case LeftPaneModePlan:
+			context = "PLAN"
+			contextItems = []WhichKeyItem{
+				{Key: "G", Description: "generate new plan"},
+				{Key: "e", Description: "edit in nvim"},
+				{Key: "r", Description: "refresh view"},
+				{Key: "s", Description: "run plan"},
+			}
+		}
+	}
+
+	// Styles
+	boxStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#1a1a2e")).
+		Foreground(lipgloss.Color("#e0e0e0")).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#4a4a6a")).
+		Padding(0, 1)
+
+	keyStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#ffd700")).
+		Bold(true)
+
+	descStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#e0e0e0"))
+
+	dimKeyStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#b8860b"))
+
+	dimDescStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#666666"))
+
+	headerStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#00d4aa")).
+		Bold(true)
+
+	separatorStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#4a4a6a"))
+
+	// Fixed column width for alignment
+	const colWidth = 24
+
+	// Helper to pad string to column width (safe for negative values)
+	padToWidth := func(s string, width int) string {
+		w := lipgloss.Width(s)
+		if w >= width {
+			return s + "  " // minimum spacing
+		}
+		return s + strings.Repeat(" ", width-w)
+	}
+
+	var lines []string
+
+	// Header
+	lines = append(lines, headerStyle.Render(context))
+
+	// Context items in 2 columns
+	for i := 0; i < len(contextItems); i += 2 {
+		left := fmt.Sprintf("%s  %s",
+			keyStyle.Render(contextItems[i].Key),
+			descStyle.Render(contextItems[i].Description))
+
+		var line string
+		if i+1 < len(contextItems) {
+			right := fmt.Sprintf("%s  %s",
+				keyStyle.Render(contextItems[i+1].Key),
+				descStyle.Render(contextItems[i+1].Description))
+			line = padToWidth(left, colWidth) + right
+		} else {
+			line = left
+		}
+		lines = append(lines, line)
+	}
+
+	// Separator
+	lines = append(lines, separatorStyle.Render(strings.Repeat("─", colWidth*2)))
+
+	// Global actions in 2 columns
+	globalItems := []WhichKeyItem{
+		{Key: "h", Description: "toggle pane"},
+		{Key: "m", Description: "toggle minimap"},
+		{Key: "c", Description: "toggle chat"},
+		{Key: "1-4", Description: "switch mode"},
+		{Key: "?", Description: "full help"},
+		{Key: "q", Description: "quit"},
+	}
+	for i := 0; i < len(globalItems); i += 2 {
+		left := fmt.Sprintf("%s  %s",
+			dimKeyStyle.Render(globalItems[i].Key),
+			dimDescStyle.Render(globalItems[i].Description))
+
+		var line string
+		if i+1 < len(globalItems) {
+			right := fmt.Sprintf("%s  %s",
+				dimKeyStyle.Render(globalItems[i+1].Key),
+				dimDescStyle.Render(globalItems[i+1].Description))
+			line = padToWidth(left, colWidth) + right
+		} else {
+			line = left
+		}
+		lines = append(lines, line)
+	}
+
+	content := strings.Join(lines, "\n")
+	return boxStyle.Render(content)
 }
 
 func parsePayload(data []byte) *Change {
