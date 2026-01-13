@@ -1,0 +1,206 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            suffix: linux-amd64
+          - goos: linux
+            goarch: arm64
+            suffix: linux-arm64
+          - goos: darwin
+            goarch: amd64
+            suffix: darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            suffix: darwin-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -o claude-mon-${{ matrix.suffix }} ./cmd/claude-mon
+
+      - name: Calculate checksum
+        id: checksum
+        run: |
+          CHECKSUM=$(sha256sum claude-mon-${{ matrix.suffix }} | awk '{print $1}')
+          echo "CHECKSUM=${CHECKSUM}" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-mon-${{ matrix.suffix }}
+          path: claude-mon-${{ matrix.suffix }}
+
+      - name: Upload checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksum-${{ matrix.suffix }}
+          path: |
+            ${{ steps.checksum.outputs.CHECKSUM }}
+
+    outputs:
+      linux_amd64_sha256: ${{ steps.checksum.outputs.CHECKSUM }}
+      darwin_amd64_sha256: ${{ steps.checksum.outputs.CHECKSUM }}
+      linux_arm64_sha256: ${{ steps.checksum.outputs.CHECKSUM }}
+      darwin_arm64_sha256: ${{ steps.checksum.outputs.CHECKSUM }}
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          for dir in artifacts/*/; do
+            cp "$dir"/* release/ 2>/dev/null || true
+          done
+          cd release
+
+          # Create tarballs for binaries
+          for f in claude-mon-*; do
+            if [[ "$f" != *.tar.gz ]] && [[ -f "$f" ]]; then
+              chmod +x "$f"
+              tar -czvf "${f}.tar.gz" "$f"
+              rm "$f"
+            fi
+          done
+
+          # Remove checksum files (we'll recreate)
+          rm -f checksum-*
+
+          # Create checksums for tarballs
+          sha256sum *.tar.gz > checksums.txt
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Get previous tag
+        id: prev_tag
+        run: |
+          PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]' | sed -n '2p')
+          echo "PREV_TAG=${PREV_TAG:-}" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          if [ -n "${{ steps.prev_tag.outputs.PREV_TAG }}" ]; then
+            CHANGELOG=$(git log ${{ steps.prev_tag.outputs.PREV_TAG }}..${{ steps.version.outputs.VERSION }} --pretty=format:"- %s" --no-merges)
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s" --no-merges -10)
+          fi
+          # Escape for GitHub Actions
+          CHANGELOG="${CHANGELOG//'%'/'%25'}"
+          CHANGELOG="${CHANGELOG//$'\n'/'%0A'}"
+          CHANGELOG="${CHANGELOG//$'\r'/'%0D'}"
+          echo "CHANGELOG=$CHANGELOG" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: claude-mon ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## claude-mon ${{ steps.version.outputs.VERSION }}
+
+            TUI application for watching Claude Code edits in real-time and managing prompts.
+
+            ### Changes
+            ${{ steps.changelog.outputs.CHANGELOG }}
+
+            ### Installation
+
+            **Homebrew:**
+            ```bash
+            brew install zach-source/tap/claude-mon
+            ```
+
+            **Nix Flake:**
+            ```nix
+            {
+              inputs.claude-mon.url = "github:zach-source/claude-mon";
+            }
+            ```
+
+            **Binary:**
+            Download the appropriate tarball for your platform from the assets below.
+          draft: false
+          prerelease: false
+          files: release/*.tar.gz
+          files: release/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger Homebrew Update
+        if: success()
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GH_TOKEN_DISPATCH }}
+          repository: zach-source/homebrew-tap
+          event-type: claude-mon-release
+          client-payload: |
+            {
+              "version": "${{ steps.version.outputs.VERSION }}",
+              "linux_amd64_sha256": "${{ needs.build.outputs.linux_amd64_sha256 }}",
+              "darwin_amd64_sha256": "${{ needs.build.outputs.darwin_amd64_sha256 }}",
+              "linux_arm64_sha256": "${{ needs.build.outputs.linux_arm64_sha256 }}",
+              "darwin_arm64_sha256": "${{ needs.build.outputs.darwin_arm64_sha256 }}"
+            }
+
+      - name: Trigger Nix Packages Update
+        if: success()
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GH_TOKEN_DISPATCH }}
+          repository: zach-source/nix-packages
+          event-type: claude-mon-release
+          client-payload: |
+            {
+              "version": "${{ steps.version.outputs.VERSION }}",
+              "linux_amd64_sha256": "${{ needs.build.outputs.linux_amd64_sha256 }}",
+              "darwin_amd64_sha256": "${{ needs.build.outputs.darwin_amd64_sha256 }}",
+              "linux_arm64_sha256": "${{ needs.build.outputs.linux_arm64_sha256 }}",
+              "darwin_arm64_sha256": "${{ needs.build.outputs.darwin_arm64_sha256 }}"
+            }

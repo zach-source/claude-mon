@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build
+        run: go build -v ./cmd/claude-mon
+
+      - name: Test
+        run: go test -v ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.1.0
+
+  tag:
+    name: Create Release Tag
+    needs: [test, lint]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get current version from main.go
+        id: current
+        run: |
+          VERSION=$(grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' cmd/claude-mon/main.go | head -1 | sed 's/.*v\([0-9.]*\).*/\1/')
+          if [ -z "$VERSION" ]; then
+            echo "Could not find version in main.go"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Current version: $VERSION"
+
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          if git rev-parse "v${{ steps.current.outputs.VERSION }}" >/dev/null 2>&1; then
+            echo "EXISTS=true" >> $GITHUB_OUTPUT
+            echo "Tag v${{ steps.current.outputs.VERSION }} already exists"
+          else
+            echo "EXISTS=false" >> $GITHUB_OUTPUT
+            echo "Tag v${{ steps.current.outputs.VERSION }} does not exist"
+          fi
+
+      - name: Create tag
+        if: steps.check_tag.outputs.EXISTS == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ steps.current.outputs.VERSION }}" -m "v${{ steps.current.outputs.VERSION }}"
+          git push origin "v${{ steps.current.outputs.VERSION }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
