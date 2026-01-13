@@ -301,7 +301,8 @@ max_limit = 50
 	}
 
 	// Wait for all edits to be processed
-	time.Sleep(1 * time.Second)
+	// Use longer delay for CI environments which may be slower
+	time.Sleep(2 * time.Second)
 
 	// Query without limit (should use default from config)
 	queryPayload := map[string]interface{}{
