@@ -25,6 +25,7 @@ const (
 
 // Daemon manages the daemon server
 type Daemon struct {
+	cfg           *Config
 	db            *database.DB
 	socketPath    string
 	queryPath     string
@@ -34,38 +35,29 @@ type Daemon struct {
 	shutdown      chan struct{}
 }
 
-// Config holds daemon configuration
-type Config struct {
-	SocketPath string
-	QueryPath  string
-	DBConfig   *database.Config
-}
-
 // DefaultConfig returns default daemon configuration
+// Deprecated: Use LoadConfig() instead for full configuration support
 func DefaultConfig() (*Config, error) {
-	dbCfg, err := database.DefaultConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	return &Config{
-		SocketPath: DefaultSocketPath,
-		QueryPath:  DefaultQuerySocketPath,
-		DBConfig:   dbCfg,
-	}, nil
+	return LoadConfig("")
 }
 
 // New creates a new daemon
 func New(cfg *Config) (*Daemon, error) {
-	db, err := database.Open(cfg.DBConfig)
+	dbCfg, err := cfg.ToDBConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get database config: %w", err)
+	}
+
+	db, err := database.Open(dbCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
 	return &Daemon{
+		cfg:        cfg,
 		db:         db,
-		socketPath: cfg.SocketPath,
-		queryPath:  cfg.QueryPath,
+		socketPath: cfg.Sockets.DaemonSocket,
+		queryPath:  cfg.Sockets.QuerySocket,
 		shutdown:   make(chan struct{}),
 	}, nil
 }
@@ -220,6 +212,12 @@ type HookPayload struct {
 
 // processPayload processes incoming hook data
 func (d *Daemon) processPayload(payload *HookPayload) error {
+	// Check if workspace should be tracked
+	if !d.cfg.ShouldTrackWorkspace(payload.Workspace) {
+		logger.Log("Workspace %s is being ignored", payload.Workspace)
+		return nil
+	}
+
 	// Ensure session exists
 	sessionID, err := d.db.UpsertSession(
 		payload.Workspace,
@@ -295,7 +293,12 @@ func (d *Daemon) executeQuery(query *Query) (*QueryResult, error) {
 
 	limit := query.Limit
 	if limit <= 0 {
-		limit = 50
+		limit = d.cfg.Query.DefaultLimit
+	}
+
+	// Enforce max limit
+	if limit > d.cfg.Query.MaxLimit {
+		limit = d.cfg.Query.MaxLimit
 	}
 
 	switch query.Type {

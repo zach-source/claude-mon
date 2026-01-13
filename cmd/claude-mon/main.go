@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ztaylor/claude-mon/internal/daemon"
@@ -21,6 +22,7 @@ var (
 	selectedTheme = "dark"
 	debugMode     = false
 	persistMode   = false
+	configPath    = ""
 )
 
 func main() {
@@ -55,6 +57,11 @@ func main() {
 			debugMode = true
 		case "--persist", "-p":
 			persistMode = true
+		case "--config":
+			if i+1 < len(args) {
+				configPath = args[i+1]
+				i++ // skip next arg
+			}
 		case "--list-themes":
 			fmt.Println("Available themes:")
 			for _, name := range theme.Available() {
@@ -76,6 +83,17 @@ func main() {
 			return
 		case "--version", "-v", "version":
 			fmt.Println("claude-mon v0.1.0")
+			return
+		case "write-config":
+			// Get path from next argument if available
+			writePath := ""
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				writePath = args[i+1]
+			}
+			if err := writeDefaultConfig(writePath); err != nil {
+				fmt.Fprintf(os.Stderr, "Error writing config: %v\n", err)
+				os.Exit(1)
+			}
 			return
 		}
 	}
@@ -163,6 +181,11 @@ Flags:
   --list-themes        List available themes
   --persist, -p        Persist history to file (.claude-mon-history.json)
   --debug, -d          Enable debug logging
+  --config <path>      Path to daemon config file (default: ~/.config/claude-mon/daemon.toml)
+
+Config Commands:
+  write-config                 Write default configuration to file
+  write-config <path>          Write configuration to custom path
 
 Available themes: dark, light, dracula, monokai, gruvbox, nord, catppuccin
 
@@ -220,9 +243,9 @@ func handleDaemonCommand() error {
 
 // startDaemon starts the daemon in foreground
 func startDaemon() error {
-	cfg, err := daemon.DefaultConfig()
+	cfg, err := daemon.LoadConfig(configPath)
 	if err != nil {
-		return fmt.Errorf("failed to get config: %w", err)
+		return fmt.Errorf("failed to load config: %w", err)
 	}
 
 	d, err := daemon.New(cfg)
@@ -231,8 +254,9 @@ func startDaemon() error {
 	}
 
 	fmt.Println("Starting claude-mon daemon...")
-	fmt.Printf("Data socket: %s\n", cfg.SocketPath)
-	fmt.Printf("Query socket: %s\n", cfg.QueryPath)
+	fmt.Printf("Data socket: %s\n", cfg.Sockets.DaemonSocket)
+	fmt.Printf("Query socket: %s\n", cfg.Sockets.QuerySocket)
+	fmt.Printf("Database: %s\n", cfg.GetDBPath())
 	fmt.Println("Press Ctrl+C to stop")
 
 	return d.Run()
@@ -366,5 +390,26 @@ func executeQuery(query *daemon.Query) error {
 		}
 	}
 
+	return nil
+}
+
+// writeDefaultConfig writes the default configuration to a file
+func writeDefaultConfig(path string) error {
+	// Use default path if not provided
+	if path == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("failed to get home directory: %w", err)
+		}
+		path = filepath.Join(homeDir, ".config", "claude-mon", "daemon.toml")
+	}
+
+	// Write config
+	if err := daemon.WriteDefaultConfig(path); err != nil {
+		return err
+	}
+
+	fmt.Printf("Default configuration written to: %s\n", path)
+	fmt.Println("Edit this file to customize your daemon settings.")
 	return nil
 }
