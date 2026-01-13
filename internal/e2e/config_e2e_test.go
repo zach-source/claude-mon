@@ -330,6 +330,10 @@ max_limit = 50
 		t.Fatalf("Failed to decode response: %v", err)
 	}
 
+	// Debug: print full response
+	resultJSON, _ := json.MarshalIndent(result, "", "  ")
+	t.Logf("Query response: %s", string(resultJSON))
+
 	edits, ok := result["edits"].([]interface{})
 	if !ok {
 		t.Fatal("Response missing 'edits' field")
