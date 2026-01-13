@@ -50,6 +50,11 @@ type promptRefineErrorMsg struct {
 	err error
 }
 
+// promptRefineInputMsg is sent when user submits refinement request
+type promptRefineInputMsg struct {
+	request string
+}
+
 // planGeneratingMsg is sent when plan generation starts
 type planGeneratingMsg struct{}
 
@@ -172,11 +177,13 @@ type Model struct {
 	persistHistory bool             // Whether to save history to file
 
 	// Prompt manager (integrated in left pane)
-	promptStore        *prompt.Store          // Prompt storage
-	promptList         []prompt.Prompt        // Cached list of prompts
-	promptSelected     int                    // Selected prompt index
-	promptRefining     bool                   // Whether we're in refine mode
-	promptInjectMethod prompt.InjectionMethod // Current injection method
+	promptStore          *prompt.Store          // Prompt storage
+	promptList           []prompt.Prompt        // Cached list of prompts
+	promptSelected       int                    // Selected prompt index
+	promptRefining       bool                   // Whether we're in refine mode
+	promptRefineInput    textinput.Model        // Refinement request input
+	promptRefiningPrompt *prompt.Prompt         // Prompt being refined
+	promptInjectMethod   prompt.InjectionMethod // Current injection method
 
 	// Version view mode
 	promptShowVersions    bool                   // Whether showing version list
@@ -339,6 +346,13 @@ func New(socketPath string, opts ...Option) Model {
 	chatTi.CharLimit = 1000
 	chatTi.Width = 60
 	m.chatInput = chatTi
+
+	// Initialize prompt refine input
+	refineTi := textinput.New()
+	refineTi.Placeholder = "What do you want to improve?"
+	refineTi.CharLimit = 500
+	refineTi.Width = 60
+	m.promptRefineInput = refineTi
 
 	return m
 }
@@ -596,6 +610,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.promptRefining = false
 		m.addToast("Refine failed: "+msg.err.Error(), ToastError)
 
+	case promptRefineInputMsg:
+		// User submitted refinement request - execute refinement
+		logger.Log("Executing refinement with request: %s", msg.request)
+		m.addToast("Refining with Claude...", ToastInfo)
+		return m, m.executePromptRefinement(msg.request)
+
 	case planGeneratedMsg:
 		logger.Log("Plan generated: %s", msg.path)
 		m.planGenerating = false
@@ -817,6 +837,33 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Handle refine input mode
+	if m.promptRefining {
+		switch key {
+		case "enter":
+			// Submit refinement request
+			request := m.promptRefineInput.Value()
+			if request != "" {
+				m.promptRefining = false
+				m.promptRefineInput.Reset()
+				return m, func() tea.Msg {
+					return promptRefineInputMsg{request: request}
+				}
+			}
+		case "esc":
+			// Cancel refine input
+			m.promptRefining = false
+			m.promptRefiningPrompt = nil
+			m.promptRefineInput.Reset()
+			return m, nil
+		default:
+			// Forward to textinput
+			var cmd tea.Cmd
+			m.promptRefineInput, cmd = m.promptRefineInput.Update(msg)
+			return m, cmd
+		}
+	}
+
 	// Normal prompt list mode
 	switch key {
 	case m.config.Keys.Down, "down":
@@ -920,7 +967,7 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case m.config.Keys.InjectMethod:
 		// Cycle injection method
-		m.promptInjectMethod = (m.promptInjectMethod + 1) % 3
+		m.promptInjectMethod = (m.promptInjectMethod + 1) % 2
 		m.addToast(fmt.Sprintf("Inject method: %s", prompt.MethodName(m.promptInjectMethod)), ToastInfo)
 	case m.config.Keys.ChatPrompt:
 		// Start Prompt-specific chat
@@ -1405,7 +1452,7 @@ func (m Model) handleLeaderKeyPrompts(key string) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "i": // Cycle inject method
-		m.promptInjectMethod = (m.promptInjectMethod + 1) % 3
+		m.promptInjectMethod = (m.promptInjectMethod + 1) % 2
 		m.addToast(fmt.Sprintf("Method: %s", prompt.MethodName(m.promptInjectMethod)), ToastInfo)
 	case "enter": // Send prompt (via inject method)
 		if len(m.promptList) > 0 {
@@ -1868,7 +1915,8 @@ func (m Model) View() string {
 
 	// Calculate pane widths based on left pane visibility
 	var leftWidth, rightWidth int
-	if m.hideLeftPane {
+	// Automatically hide left pane in Ralph mode for full-width view
+	if m.hideLeftPane || m.leftPaneMode == LeftPaneModeRalph {
 		leftWidth = 0
 		rightWidth = m.width - 2 - minimapWidth
 	} else {
@@ -2129,6 +2177,27 @@ func (m Model) renderPromptsList() string {
 	var sb strings.Builder
 	listWidth := m.width / 3
 
+	// Show refine input overlay when refining
+	if m.promptRefining {
+		sb.WriteString(m.theme.Title.Render("Refine Prompt") + "\n")
+		sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", listWidth-4)) + "\n\n")
+
+		sb.WriteString(m.theme.Normal.Render("What do you want to improve?\n\n"))
+		sb.WriteString(m.promptRefineInput.View() + "\n\n")
+		sb.WriteString(m.theme.Dim.Render("Enter:submit  Esc:cancel\n\n"))
+
+		// Show available template variables
+		sb.WriteString(m.theme.Title.Render("Available Variables:") + "\n")
+		sb.WriteString(m.theme.Dim.Render("{{plan}}       Plan content\n"))
+		sb.WriteString(m.theme.Dim.Render("{{plan_name}}  Plan file name\n"))
+		sb.WriteString(m.theme.Dim.Render("{{file}}       Current file path\n"))
+		sb.WriteString(m.theme.Dim.Render("{{file_name}}  Current file name\n"))
+		sb.WriteString(m.theme.Dim.Render("{{project}}    Project name\n"))
+		sb.WriteString(m.theme.Dim.Render("{{cwd}}        Working directory\n"))
+
+		return sb.String()
+	}
+
 	if m.promptShowVersions {
 		// Version view mode
 		sb.WriteString(m.theme.Title.Render("Versions") + "\n")
@@ -2285,22 +2354,63 @@ func (m *Model) renderRightPane() string {
 
 // renderRalphPrompt renders the Ralph prompt content for the right pane
 func (m *Model) renderRalphPrompt() string {
+	// In Ralph mode, use the full-width renderer
+	return m.renderRalphFull()
+}
+
+// renderRalphFull renders a combined full-width Ralph view (status + prompt)
+func (m *Model) renderRalphFull() string {
 	var sb strings.Builder
 
 	if m.ralphState == nil || !m.ralphState.Active {
-		return m.theme.Dim.Render("No active Ralph loop.\n\nSwitch to History or Prompts tab to work on something else.")
+		sb.WriteString(m.theme.Title.Render("Ralph Loop") + "\n")
+		sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", m.width-4)) + "\n\n")
+		sb.WriteString(m.theme.Dim.Render("No active Ralph loop\n\n"))
+		sb.WriteString(m.theme.Dim.Render("Start a Ralph loop with:\n"))
+		sb.WriteString(m.theme.Normal.Render("  /ralph-loop\n\n"))
+		return sb.String()
 	}
 
-	sb.WriteString(m.theme.Title.Render("Ralph Loop Prompt") + "\n")
-	sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", 40)) + "\n\n")
+	// Status section at top
+	sb.WriteString(m.theme.Title.Render("Ralph Loop Status") + "\n")
+	sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", m.width-4)) + "\n\n")
+
+	// Active status
+	if m.ralphState.Active {
+		sb.WriteString(m.theme.Selected.Render("🔄 Active") + "  ")
+
+		// Iteration progress
+		progress := fmt.Sprintf("Iteration: %d/%d", m.ralphState.Iteration, m.ralphState.MaxIterations)
+		sb.WriteString(m.theme.Normal.Render(progress) + "\n\n")
+
+		// Completion promise
+		if m.ralphState.Promise != "" {
+			sb.WriteString(m.theme.Dim.Render("Promise: ") + m.theme.Normal.Render("\""+m.ralphState.Promise+"\"") + "\n\n")
+		}
+
+		// Started at
+		if !m.ralphState.StartedAt.IsZero() {
+			durationStr := ralph.FormatDuration(time.Since(m.ralphState.StartedAt))
+			sb.WriteString(m.theme.Dim.Render("Started: ") + m.theme.Normal.Render(durationStr) + "\n\n")
+		}
+
+		// State file location
+		if m.ralphState.Path != "" {
+			sb.WriteString(m.theme.Dim.Render("State: ") + m.theme.Normal.Render(m.ralphState.Path) + "\n\n")
+		}
+	}
+
+	// Prompt content section
+	sb.WriteString(m.theme.Title.Render("Loop Prompt") + "\n")
+	sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", m.width-4)) + "\n\n")
 
 	if m.ralphState.Prompt == "" {
-		sb.WriteString(m.theme.Dim.Render("No prompt content found"))
+		sb.WriteString(m.theme.Dim.Render("No prompt content"))
 		return sb.String()
 	}
 
 	// Render prompt as markdown
-	rendered, err := m.renderMarkdown(m.ralphState.Prompt, m.diffViewport.Width-4)
+	rendered, err := m.renderMarkdown(m.ralphState.Prompt, m.width-4)
 	if err != nil {
 		sb.WriteString(m.ralphState.Prompt)
 	} else {
@@ -3328,10 +3438,8 @@ func (m *Model) editPrompt(p prompt.Prompt) (Model, tea.Cmd) {
 	})
 }
 
-// refinePrompt uses Claude CLI to refine a prompt, then opens nvim diff
+// refinePrompt activates input mode for collecting user's refinement request
 func (m *Model) refinePrompt(p prompt.Prompt) (Model, tea.Cmd) {
-	m.promptRefining = true
-
 	// Auto-create version backup before refining
 	if m.promptStore != nil {
 		if err := m.promptStore.CreateVersion(&p); err != nil {
@@ -3341,21 +3449,25 @@ func (m *Model) refinePrompt(p prompt.Prompt) (Model, tea.Cmd) {
 		}
 	}
 
-	return *m, func() tea.Msg {
-		// Build refinement meta-prompt
-		metaPrompt := fmt.Sprintf(`You are a prompt engineering expert. Improve the following prompt to be clearer, more specific, and more effective.
+	// Store the prompt being refined and activate input mode
+	m.promptRefining = true
+	m.promptRefiningPrompt = &p
+	m.promptRefineInput.Focus()
+	m.promptRefineInput.Reset()
 
-Keep the same general intent but enhance:
-- Clarity of instructions
-- Specificity of expected output format
-- Edge case handling
-- Any missing context that would help
+	return *m, textinput.Blink
+}
 
-<current_prompt>
-%s
-</current_prompt>
+// executePromptRefinement runs Claude CLI to refine the prompt based on user request
+func (m *Model) executePromptRefinement(request string) tea.Cmd {
+	return func() tea.Msg {
+		p := m.promptRefiningPrompt
+		if p == nil {
+			return promptRefineErrorMsg{err: fmt.Errorf("no prompt to refine")}
+		}
 
-Output ONLY the improved prompt text with no preamble, no explanations, no markdown code fences. Just the raw improved prompt.`, p.Content)
+		// Build refinement meta-prompt with template variables
+		metaPrompt := m.buildRefinementMetaPrompt(*p, request)
 
 		// Run Claude CLI with -p flag for print mode (non-interactive)
 		cmd := exec.Command("claude", "-p", metaPrompt)
@@ -3397,6 +3509,85 @@ Output ONLY the improved prompt text with no preamble, no explanations, no markd
 			refinedPath:  refinedPath,
 		}
 	}
+}
+
+// buildRefinementMetaPrompt creates a meta-prompt for Claude CLI with template variables
+func (m *Model) buildRefinementMetaPrompt(p prompt.Prompt, request string) string {
+	// Get available template variables and their current values
+	vars := m.getTemplateVariableValues()
+
+	varVars := ""
+	for name, value := range vars {
+		varVars += fmt.Sprintf("- %s: %s\n", name, value)
+	}
+
+	return fmt.Sprintf(`You are a prompt engineering expert. Improve the following prompt based on the user's request.
+
+USER'S REQUEST:
+%s
+
+AVAILABLE TEMPLATE VARIABLES:
+The prompt supports these template variables that will be expanded when used:
+%s
+
+CURRENT PROMPT:
+%s
+
+Your task:
+1. Address the user's specific request
+2. Enhance clarity, specificity, and effectiveness
+3. Consider how template variables could be better utilized
+4. Maintain compatibility with existing template variables
+
+Output ONLY the improved prompt text with no preamble, no explanations, no markdown code fences. Just the raw improved prompt that maintains YAML frontmatter format.`, request, varVars, p.Content)
+}
+
+// getTemplateVariableValues returns current values for all available template variables
+func (m *Model) getTemplateVariableValues() map[string]string {
+	vars := make(map[string]string)
+
+	// Get current file info
+	var filePath, fileName string
+	if len(m.changes) > 0 && m.selectedIndex < len(m.changes) {
+		filePath = m.changes[m.selectedIndex].FilePath
+		fileName = filepath.Base(filePath)
+	}
+
+	// Get project directory
+	projectDir := ""
+	if filePath != "" {
+		projectDir = findProjectRoot(filepath.Dir(filePath))
+	}
+	if projectDir == "" && m.promptStore != nil {
+		projectDir = m.promptStore.ProjectDir()
+	}
+	if projectDir == "" {
+		projectDir, _ = os.Getwd()
+	}
+
+	projectName := filepath.Base(projectDir)
+	cwd, _ := os.Getwd()
+
+	// Populate template variables
+	vars["{{file}}"] = filePath
+	vars["{{file_name}}"] = fileName
+	vars["{{project}}"] = projectName
+	vars["{{cwd}}"] = cwd
+
+	// Plan variables
+	if m.planPath != "" {
+		vars["{{plan_name}}"] = filepath.Base(m.planPath)
+		if m.planContent != "" {
+			vars["{{plan}}"] = m.planContent
+		} else {
+			vars["{{plan}}"] = "(no plan loaded)"
+		}
+	} else {
+		vars["{{plan_name}}"] = "(none)"
+		vars["{{plan}}"] = "(none)"
+	}
+
+	return vars
 }
 
 // loadVersionList loads the list of versions for the currently selected prompt
