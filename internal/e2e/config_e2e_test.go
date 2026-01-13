@@ -300,6 +300,9 @@ max_limit = 50
 			t.Fatalf("Failed to send payload: %v", err)
 		}
 		conn.Close()
+
+		// Small delay between sends to avoid overwhelming daemon in CI
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Wait for all edits to be processed
