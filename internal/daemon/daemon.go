@@ -298,14 +298,19 @@ type Query struct {
 // QueryResult represents query results
 type QueryResult struct {
 	Type     string              `json:"type"`
-	Edits    []*database.Edit    `json:"edits,omitempty"`
-	Prompts  []*database.Prompt  `json:"prompts,omitempty"`
-	Sessions []*database.Session `json:"sessions,omitempty"`
+	Edits    []*database.Edit    `json:"edits"`
+	Prompts  []*database.Prompt  `json:"prompts"`
+	Sessions []*database.Session `json:"sessions"`
 }
 
 // executeQuery executes a database query
 func (d *Daemon) executeQuery(query *Query) (*QueryResult, error) {
-	result := &QueryResult{Type: query.Type}
+	result := &QueryResult{
+		Type:     query.Type,
+		Edits:    []*database.Edit{},
+		Prompts:  []*database.Prompt{},
+		Sessions: []*database.Session{},
+	}
 
 	limit := query.Limit
 	if limit <= 0 {
@@ -323,7 +328,9 @@ func (d *Daemon) executeQuery(query *Query) (*QueryResult, error) {
 		if err != nil {
 			return nil, err
 		}
-		result.Edits = edits
+		if edits != nil {
+			result.Edits = edits
+		}
 
 	case "file":
 		if query.FilePath == "" {
@@ -333,7 +340,9 @@ func (d *Daemon) executeQuery(query *Query) (*QueryResult, error) {
 		if err != nil {
 			return nil, err
 		}
-		result.Edits = edits
+		if edits != nil {
+			result.Edits = edits
+		}
 
 	case "prompts":
 		name := query.Name
@@ -344,14 +353,18 @@ func (d *Daemon) executeQuery(query *Query) (*QueryResult, error) {
 		if err != nil {
 			return nil, err
 		}
-		result.Prompts = prompts
+		if prompts != nil {
+			result.Prompts = prompts
+		}
 
 	case "sessions":
 		sessions, err := d.db.GetSessions(limit)
 		if err != nil {
 			return nil, err
 		}
-		result.Sessions = sessions
+		if sessions != nil {
+			result.Sessions = sessions
+		}
 
 	default:
 		return nil, fmt.Errorf("unknown query type: %s", query.Type)

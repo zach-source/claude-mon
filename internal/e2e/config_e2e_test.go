@@ -147,11 +147,17 @@ func TestDaemonEnvOverride(t *testing.T) {
 func TestWorkspaceFiltering(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "daemon.toml")
+	daemonSocket := filepath.Join(tempDir, "daemon.sock")
+	querySocket := filepath.Join(tempDir, "query.sock")
 
-	// Create config that ignores /tmp paths
+	// Create config that ignores /tmp paths with custom sockets
 	configContent := `
 [directory]
 data_dir = "` + tempDir + `/data"
+
+[sockets]
+daemon_socket = "` + daemonSocket + `"
+query_socket = "` + querySocket + `"
 
 [workspaces]
 ignored = ["/tmp", "/var/tmp"]
@@ -185,7 +191,7 @@ ignored = ["/tmp", "/var/tmp"]
 		"line_count":     1,
 	}
 
-	conn, err := net.Dial("unix", "/tmp/claude-mon-daemon.sock")
+	conn, err := net.Dial("unix", daemonSocket)
 	if err != nil {
 		t.Fatalf("Failed to connect to daemon: %v", err)
 	}
@@ -205,7 +211,7 @@ ignored = ["/tmp", "/var/tmp"]
 		"limit": 10,
 	}
 
-	queryConn, err := net.Dial("unix", "/tmp/claude-mon-query.sock")
+	queryConn, err := net.Dial("unix", querySocket)
 	if err != nil {
 		t.Fatalf("Failed to connect to query socket: %v", err)
 	}
@@ -236,11 +242,17 @@ ignored = ["/tmp", "/var/tmp"]
 func TestQueryLimit(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "daemon.toml")
+	daemonSocket := filepath.Join(tempDir, "daemon.sock")
+	querySocket := filepath.Join(tempDir, "query.sock")
 
-	// Create config with custom query limit
+	// Create config with custom query limit and unique sockets
 	configContent := `
 [directory]
 data_dir = "` + tempDir + `/data"
+
+[sockets]
+daemon_socket = "` + daemonSocket + `"
+query_socket = "` + querySocket + `"
 
 [query]
 default_limit = 10
@@ -276,7 +288,7 @@ max_limit = 50
 			"line_count":     1,
 		}
 
-		conn, err := net.Dial("unix", "/tmp/claude-mon-daemon.sock")
+		conn, err := net.Dial("unix", daemonSocket)
 		if err != nil {
 			t.Fatalf("Failed to connect: %v", err)
 		}
@@ -288,12 +300,15 @@ max_limit = 50
 		conn.Close()
 	}
 
+	// Wait for all edits to be processed
+	time.Sleep(1 * time.Second)
+
 	// Query without limit (should use default from config)
 	queryPayload := map[string]interface{}{
 		"type": "recent",
 	}
 
-	queryConn, err := net.Dial("unix", "/tmp/claude-mon-query.sock")
+	queryConn, err := net.Dial("unix", querySocket)
 	if err != nil {
 		t.Fatalf("Failed to connect to query socket: %v", err)
 	}

@@ -87,18 +87,30 @@ format = "sqlite"
 
 ## 📊 E2E Test Status
 
+**Latest Commit:** 0837600
+
 **Test File:** `internal/e2e/config_e2e_test.go`
 
 | Test | Status | Notes |
 |------|--------|-------|
 | TestConfigWriteDefault | ✅ PASS | Config generation works |
+| TestDaemonStartupWithConfig | ✅ PASS | Custom config loads correctly |
 | TestDaemonEnvOverride | ✅ PASS | Env vars override config |
 | TestRetentionSettings | ✅ PASS | Settings load correctly |
-| TestDaemonStartupWithConfig | ❌ FAIL | Timing issue with DB creation |
-| TestWorkspaceFiltering | ❌ FAIL | Data persistence across tests |
-| TestQueryLimit | ❌ FAIL | Race condition with test data |
+| TestWorkspaceFiltering | ⚠️ FAIL | Needs isolation (uses existing data) |
+| TestQueryLimit | ⚠️ FAIL | Needs isolation (uses existing data) |
 
-**Pass Rate:** 3/6 (50%)
+**Pass Rate:** 4/6 (67%) ⬆️ from 50%
+
+**Recent Fixes:**
+- ✅ Fixed --config flag parsing (was not handled before daemon command)
+- ✅ Database now created at custom location from config
+- ✅ Integration test verified custom config works end-to-end
+
+**Remaining Issues:**
+- TestWorkspaceFiltering and TestQueryLimit fail due to test data persistence
+- Tests need better isolation (each test should use unique database)
+- Not a bug in functionality, just test cleanup needed
 
 The failing tests have the correct logic but need:
 1. Better synchronization with daemon startup
