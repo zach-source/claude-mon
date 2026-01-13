@@ -351,3 +351,87 @@ func (d *DB) GetSessions(limit int) ([]*Session, error) {
 
 	return sessions, nil
 }
+
+// DeleteOldEdits deletes edits older than the specified date
+func (d *DB) DeleteOldEdits(beforeDate time.Time) (int64, error) {
+	result, err := d.db.Exec("DELETE FROM edits WHERE timestamp < ?", beforeDate.Format(time.RFC3339))
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete old edits: %w", err)
+	}
+
+	return result.RowsAffected()
+}
+
+// CapEditsPerSession caps the number of edits for a specific session
+func (d *DB) CapEditsPerSession(sessionID int64, maxEdits int) (int64, error) {
+	// First, count the edits
+	var count int
+	err := d.db.QueryRow("SELECT COUNT(*) FROM edits WHERE session_id = ?", sessionID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count edits: %w", err)
+	}
+
+	if count <= maxEdits {
+		return 0, nil // No need to cap
+	}
+
+	// Delete oldest edits beyond the limit
+	query := `
+		DELETE FROM edits
+		WHERE session_id = ?
+		AND id NOT IN (
+			SELECT id FROM edits
+			WHERE session_id = ?
+			ORDER BY timestamp DESC
+			LIMIT ?
+		)
+	`
+
+	result, err := d.db.Exec(query, sessionID, sessionID, maxEdits)
+	if err != nil {
+		return 0, fmt.Errorf("failed to cap edits: %w", err)
+	}
+
+	return result.RowsAffected()
+}
+
+// GetDatabaseSize returns the size of the database file in bytes
+func (d *DB) GetDatabaseSize() (int64, error) {
+	var dbPath string
+	err := d.db.QueryRow("PRAGMA database_list").Scan(&dbPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get database path: %w", err)
+	}
+
+	// For SQLite, the path is usually embedded in the result
+	// We need to extract just the file path
+	// For now, use a simpler approach - check the main database file
+	// This is a bit of a workaround but works for our use case
+	return getDatabaseSizeFromPath(d.db)
+}
+
+// getDatabaseSizeFromPath gets the database file size from PRAGMA
+func getDatabaseSizeFromPath(db *sql.DB) (int64, error) {
+	// Use page count and page size to calculate size
+	var pageSize, pageCount int
+	err := db.QueryRow("PRAGMA page_size").Scan(&pageSize)
+	if err != nil {
+		return 0, err
+	}
+
+	err = db.QueryRow("PRAGMA page_count").Scan(&pageCount)
+	if err != nil {
+		return 0, err
+	}
+
+	return int64(pageSize * pageCount), nil
+}
+
+// Vacuum runs VACUUM to reclaim disk space
+func (d *DB) Vacuum() error {
+	_, err := d.db.Exec("VACUUM")
+	if err != nil {
+		return fmt.Errorf("failed to vacuum: %w", err)
+	}
+	return nil
+}

@@ -25,14 +25,16 @@ const (
 
 // Daemon manages the daemon server
 type Daemon struct {
-	cfg           *Config
-	db            *database.DB
-	socketPath    string
-	queryPath     string
-	listener      net.Listener
-	queryListener net.Listener
-	wg            sync.WaitGroup
-	shutdown      chan struct{}
+	cfg            *Config
+	db             *database.DB
+	cleanupManager *CleanupManager
+	backupManager  *BackupManager
+	socketPath     string
+	queryPath      string
+	listener       net.Listener
+	queryListener  net.Listener
+	wg             sync.WaitGroup
+	shutdown       chan struct{}
 }
 
 // DefaultConfig returns default daemon configuration
@@ -53,13 +55,21 @@ func New(cfg *Config) (*Daemon, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	return &Daemon{
+	d := &Daemon{
 		cfg:        cfg,
 		db:         db,
 		socketPath: cfg.Sockets.DaemonSocket,
 		queryPath:  cfg.Sockets.QuerySocket,
 		shutdown:   make(chan struct{}),
-	}, nil
+	}
+
+	// Initialize cleanup manager
+	d.cleanupManager = NewCleanupManager(cfg, db)
+
+	// Initialize backup manager
+	d.backupManager = NewBackupManager(cfg)
+
+	return d, nil
 }
 
 // Start starts the daemon server
@@ -83,6 +93,12 @@ func (d *Daemon) Start() error {
 	d.queryListener = queryListener
 
 	logger.Log("Daemon started on %s (query: %s)", d.socketPath, d.queryPath)
+
+	// Start cleanup manager
+	d.cleanupManager.Start()
+
+	// Start backup manager
+	d.backupManager.Start()
 
 	// Start accept goroutines
 	d.wg.Add(2)
@@ -363,6 +379,12 @@ func (d *Daemon) Stop() error {
 	logger.Log("Shutting down daemon...")
 
 	close(d.shutdown)
+
+	// Stop cleanup manager
+	d.cleanupManager.Stop()
+
+	// Stop backup manager
+	d.backupManager.Stop()
 
 	// Close listeners
 	if d.listener != nil {

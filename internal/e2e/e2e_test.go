@@ -9,8 +9,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/exp/teatest"
 	"github.com/muesli/termenv"
-	"github.com/ztaylor/claude-follow-tui/internal/config"
-	"github.com/ztaylor/claude-follow-tui/internal/model"
+	"github.com/ztaylor/claude-mon/internal/config"
+	"github.com/ztaylor/claude-mon/internal/model"
 )
 
 // TestInit sets up test environment with consistent output
