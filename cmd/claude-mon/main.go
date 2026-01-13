@@ -26,7 +26,31 @@ var (
 )
 
 func main() {
-	// Handle daemon and query commands first
+	// Parse global flags first (--config, --theme, etc.)
+	args := os.Args[1:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--config":
+			if i+1 < len(args) {
+				configPath = args[i+1]
+				i++ // skip next arg
+			}
+		case "--theme", "-t":
+			if i+1 < len(args) {
+				selectedTheme = args[i+1]
+				i++ // skip next arg
+			}
+		case "--debug", "-d":
+			debugMode = true
+		case "--persist", "-p":
+			persistMode = true
+		case "--version", "-v", "version":
+			fmt.Println("claude-mon v0.1.0")
+			return
+		}
+	}
+
+	// Handle daemon and query commands
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "daemon":
@@ -44,8 +68,8 @@ func main() {
 		}
 	}
 
-	// Parse flags first
-	args := os.Args[1:]
+	// Continue parsing other flags for TUI
+	args = os.Args[1:]
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--theme", "-t":
