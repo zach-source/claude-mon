@@ -1,6 +1,6 @@
-# claude-follow-tui
+# claude-mon (clmon)
 
-A TUI application for watching Claude Code's file edits in real-time and managing prompts.
+A TUI application and daemon for watching Claude Code's file edits in real-time, managing prompts, and querying edit history.
 
 ## Features
 
@@ -26,15 +26,24 @@ A TUI application for watching Claude Code's file edits in real-time and managin
 - **Toast notifications**: Floating feedback for all actions
 - **Mode switching**: Toggle between History and Prompts views
 
+### Daemon & Data Management
+- **Background daemon**: Tracks all edits from any Claude session
+- **Persistent storage**: SQLite database with WAL mode for reliability
+- **Query interface**: Search edits by file, session, or recency
+- **Automated cleanup**: Configurable data retention and vacuum
+- **Backup system**: Periodic compressed backups
+- **Workspace filtering**: Track or ignore specific paths
+- **Comprehensive configuration**: TOML-based config with env var overrides
+
 ## Installation
 
 ```bash
 # Clone the repo
-git clone https://github.com/ztaylor/claude-follow-tui
-cd claude-follow-tui
+git clone https://github.com/ztaylor/claude-mon
+cd claude-mon
 
 # Build
-go build -o claude-follow-tui ./cmd/claude-follow-tui
+go build -o claude-mon ./cmd/claude-mon
 
 # Or use make
 make build
@@ -43,18 +52,82 @@ make install
 
 ## Usage
 
+### TUI Mode
+
 ```bash
-# Basic usage
-claude-follow-tui
+# Basic usage (both commands work the same)
+claude-mon
+clmon
 
 # With debug logging
-claude-follow-tui -debug
+claude-mon -debug
+clmon -debug
 
 # With persistent history
-claude-follow-tui -persist
+claude-mon -persist
 
 # Custom socket path
-claude-follow-tui -socket /path/to/socket
+claude-mon -socket /path/to/socket
+```
+
+### Daemon Mode
+
+The daemon runs in the background, tracking all Claude edits to a persistent database:
+
+```bash
+# Start the daemon
+claude-mon daemon start
+
+# Stop the daemon
+claude-mon daemon stop
+
+# Check daemon status
+claude-mon daemon status
+
+# Start with custom config
+claude-mon daemon start --config /path/to/config.toml
+```
+
+### Querying Edit History
+
+Query the daemon for edit history:
+
+```bash
+# Show recent activity
+claude-mon query recent
+
+# Show recent activity with limit
+claude-mon query recent 100
+
+# Show edits for a specific file
+claude-mon query file /path/to/file.go
+
+# List all prompts
+claude-mon query prompts
+
+# List all sessions
+claude-mon query sessions
+```
+
+### Configuration
+
+Generate a default configuration file:
+
+```bash
+# Write to default location (~/.config/claude-mon/daemon.toml)
+claude-mon write-config
+
+# Write to custom path
+claude-mon write-config /path/to/config.toml
+```
+
+**Configuration priority:** CLI flags > Config file > Environment variables > Defaults
+
+**Environment variable overrides:**
+
+```bash
+export CLAUDE_MON_DATA_DIR=/custom/path
+claude-mon daemon start
 ```
 
 ## Keybindings
@@ -155,6 +228,75 @@ Current plan context:
 {{plan}}
 ```
 
+## Configuration
+
+The daemon uses a comprehensive TOML configuration file at `~/.config/claude-mon/daemon.toml`.
+
+### Configuration Sections
+
+```toml
+[directory]
+data_dir = "~/.claude-mon"              # Base directory for data
+
+[database]
+path = "claude-mon.db"                  # Database filename
+max_db_size_mb = 500                    # Trigger cleanup when exceeded
+wal_checkpoint_pages = 1000             # WAL checkpoint threshold
+
+[sockets]
+daemon_socket = "/tmp/claude-mon-daemon.sock"
+query_socket = "/tmp/claude-mon-query.sock"
+buffer_size = 8192                       # Socket buffer size
+
+[query]
+default_limit = 50                       # Default query result limit
+max_limit = 1000                         # Maximum allowed limit
+timeout_seconds = 30                     # Query timeout
+
+[retention]
+retention_days = 90                      # Auto-delete records older than N days
+max_edits_per_session = 10000           # Cap per session
+cleanup_interval_hours = 24             # How often to cleanup
+auto_vacuum = true                       # Reclaim disk space
+
+[backup]
+enabled = true
+path = "backups"                         # Relative to data_dir
+interval_hours = 24                      # Backup interval
+retention_days = 30                      # Keep backups for N days
+format = "sqlite"                        # "sqlite" or "export"
+
+[workspaces]
+tracked = []                             # Empty = track all
+ignored = ["/tmp", "/var/tmp"]           # Blacklist
+
+[hooks]
+timeout_seconds = 30                     # Socket read timeout
+retry_attempts = 3                       # Retry on failure
+async_mode = false                       # Fire-and-forget mode
+
+[logging]
+path = "claude-mon.log"                  # Relative to data_dir
+level = "info"                           # debug, info, warn, error
+max_size_mb = 100                        # Rotation threshold
+max_backups = 3                          # Old logs to keep
+compress = true                          # Gzip rotation
+
+[performance]
+max_connections = 50
+pool_size = 10
+cache_enabled = true
+cache_ttl_seconds = 300
+```
+
+### Generating Default Config
+
+```bash
+claude-mon write-config
+```
+
+This creates `~/.config/claude-mon/daemon.toml` with all default values and comments.
+
 ## Storage Structure
 
 ```
@@ -170,11 +312,11 @@ Current plan context:
 
 ## Integration with Claude Code
 
-Add to your Claude Code hooks (e.g., `follow-mode-notify.sh`):
+Add to your Claude Code hooks (e.g., `claude-mon-notify.sh`):
 
 ```bash
 #!/bin/bash
-SOCKET_PATH="/tmp/claude-follow-${WORKSPACE_ID}.sock"
+SOCKET_PATH="/tmp/claude-mon-${WORKSPACE_ID}.sock"
 
 # Send to TUI if socket exists
 if [[ -S "$SOCKET_PATH" ]]; then
@@ -188,9 +330,15 @@ fi
 Claude PostToolUse hook
         │
         ▼
-follow-mode-notify.sh
+claude-mon-notify.sh
         │
-        └──► Unix socket ──► claude-follow-tui (TUI)
+        ├──► Unix socket ──► claude-mon daemon ──► SQLite Database
+        │                      │                      │
+        │                      ├── Cleanup Manager    │
+        │                      ├── Backup Manager     │
+        │                      └── Query Interface    │
+        │
+        └──► Unix socket ──► claude-mon (TUI)
                                     │
                                     ├── History View
                                     │   └── Diff with syntax highlighting
@@ -201,6 +349,14 @@ follow-mode-notify.sh
                                         └── Claude CLI refinement
 ```
 
+**Data Flow:**
+
+1. **Edit Tracking:** Claude hooks → Unix socket → Daemon → SQLite
+2. **Cleanup:** Background goroutine → Delete old records → Vacuum database
+3. **Backup:** Background goroutine → Copy database → Gzip compression
+4. **Querying:** CLI query → Unix socket → Daemon → SQL query → Results
+5. **TUI Display:** TUI connects to socket → Real-time updates
+
 ## Requirements
 
 - Go 1.24+
@@ -209,11 +365,40 @@ follow-mode-notify.sh
 
 ## Flags
 
+### TUI Flags
+
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-debug` | `false` | Enable debug logging to `/tmp/claude-follow-tui.log` |
-| `-persist` | `false` | Save history to disk |
-| `-socket` | auto | Custom Unix socket path |
+| `--theme, -t` | `dark` | Color theme (dark, light, dracula, monokai, gruvbox, nord, catppuccin) |
+| `--list-themes` | - | List available themes |
+| `--persist, -p` | `false` | Save history to `.claude-mon-history.json` |
+| `--debug, -d` | `false` | Enable debug logging |
+| `--config` | `~/.config/claude-mon/daemon.toml` | Path to daemon config file |
+
+### Daemon Flags
+
+| Flag | Description |
+|------|-------------|
+| `--config <path>` | Path to custom configuration file |
+
+### Query Flags
+
+| Flag | Description |
+|------|-------------|
+| `recent [limit]` | Show recent edits (default limit from config) |
+| `file <path> [limit]` | Show edits for specific file |
+| `prompts [name] [limit]` | List all prompts or filter by name |
+| `sessions [limit]` | List all sessions |
+
+## Recent Enhancements
+
+- ✅ **Comprehensive configuration system** with TOML support
+- ✅ **Automated data retention** with configurable cleanup policies
+- ✅ **Backup system** with periodic snapshots and compression
+- ✅ **Workspace filtering** to track or ignore specific paths
+- ✅ **Query interface** for searching edit history
+- ✅ **Environment variable overrides** for all settings
+- ✅ **100% E2E test coverage** of configuration system
 
 ## License
 
