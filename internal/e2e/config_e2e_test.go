@@ -174,7 +174,8 @@ ignored = ["/tmp", "/var/tmp"]
 	}
 	defer cmd.Process.Kill()
 
-	time.Sleep(2 * time.Second)
+	// Give daemon extra time to fully initialize in CI
+	time.Sleep(3 * time.Second)
 
 	// Send edit event from ignored workspace
 	editPayload := map[string]interface{}{
@@ -270,7 +271,8 @@ max_limit = 50
 	}
 	defer cmd.Process.Kill()
 
-	time.Sleep(2 * time.Second)
+	// Give daemon extra time to fully initialize in CI
+	time.Sleep(3 * time.Second)
 
 	// Send multiple edit events
 	for i := 0; i < 20; i++ {
@@ -302,7 +304,7 @@ max_limit = 50
 
 	// Wait for all edits to be processed
 	// Use longer delay for CI environments which may be slower
-	time.Sleep(2 * time.Second)
+	time.Sleep(3 * time.Second)
 
 	// Query without limit (should use default from config)
 	queryPayload := map[string]interface{}{
