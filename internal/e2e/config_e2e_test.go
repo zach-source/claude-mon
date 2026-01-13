@@ -268,8 +268,6 @@ ignored = []
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	t.Logf("Starting daemon with config: %s", configPath)
-
 	// Start daemon
 	cmd := exec.Command("../../bin/claude-mon", "daemon", "start", "--config", configPath)
 	if err := cmd.Start(); err != nil {
@@ -280,18 +278,12 @@ ignored = []
 	// Give daemon extra time to fully initialize in CI
 	time.Sleep(3 * time.Second)
 
-	// Check if daemon process is still running
-	if err := cmd.Process.Signal(os.Signal(nil)); err != nil {
-		t.Logf("Daemon process check: %v", err)
-	}
-
-	t.Logf("Sending 20 edit events to daemon socket: %s", daemonSocket)
-
 	// Verify daemon socket exists
 	if _, err := os.Stat(daemonSocket); os.IsNotExist(err) {
 		t.Fatalf("Daemon socket does not exist: %s", daemonSocket)
 	}
 
+	// Send multiple edit events
 	for i := 0; i < 20; i++ {
 		editPayload := map[string]interface{}{
 			"type":           "edit",
@@ -322,13 +314,9 @@ ignored = []
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	t.Logf("Sent 20 edit events, waiting for processing")
-
 	// Wait for all edits to be processed
 	// Use longer delay for CI environments which may be slower
 	time.Sleep(3 * time.Second)
-
-	t.Logf("Querying daemon socket: %s", querySocket)
 
 	// Verify query socket exists
 	if _, err := os.Stat(querySocket); os.IsNotExist(err) {
@@ -355,10 +343,6 @@ ignored = []
 	if err := decoder.Decode(&result); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
-
-	// Debug: print full response
-	resultJSON, _ := json.MarshalIndent(result, "", "  ")
-	t.Logf("Query response: %s", string(resultJSON))
 
 	edits, ok := result["edits"].([]interface{})
 	if !ok {
