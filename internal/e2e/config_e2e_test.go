@@ -264,6 +264,8 @@ max_limit = 50
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
+	t.Logf("Starting daemon with config: %s", configPath)
+
 	// Start daemon
 	cmd := exec.Command("../../bin/claude-mon", "daemon", "start", "--config", configPath)
 	if err := cmd.Start(); err != nil {
@@ -274,7 +276,12 @@ max_limit = 50
 	// Give daemon extra time to fully initialize in CI
 	time.Sleep(3 * time.Second)
 
-	// Send multiple edit events
+	// Check if daemon process is still running
+	if err := cmd.Process.Signal(os.Signal(nil)); err != nil {
+		t.Logf("Daemon process check: %v", err)
+	}
+
+	t.Logf("Sending 20 edit events to daemon socket: %s", daemonSocket)
 	for i := 0; i < 20; i++ {
 		editPayload := map[string]interface{}{
 			"type":           "edit",
@@ -305,9 +312,13 @@ max_limit = 50
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	t.Logf("Sent 20 edit events, waiting for processing")
+
 	// Wait for all edits to be processed
 	// Use longer delay for CI environments which may be slower
 	time.Sleep(3 * time.Second)
+
+	t.Logf("Querying daemon socket: %s", querySocket)
 
 	// Query without limit (should use default from config)
 	queryPayload := map[string]interface{}{
