@@ -482,6 +482,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case m.config.Keys.ToggleChat:
 			return m.startChat()
+		case m.config.Keys.Quit:
+			return m, tea.Quit
 		}
 
 		// Mode-specific key handling
