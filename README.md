@@ -24,7 +24,8 @@ A TUI application and daemon for watching Claude Code's file edits in real-time,
 ### UI Features
 - **Two-pane layout**: List on left, content preview on right
 - **Toast notifications**: Floating feedback for all actions
-- **Mode switching**: Toggle between History and Prompts views
+- **Mode switching**: Toggle between History, Prompts, Ralph, and Plan views
+- **Auto-refresh**: Ralph page auto-refreshes every 5 seconds to track loop progress
 
 ### Daemon & Data Management
 - **Background daemon**: Tracks all edits from any Claude session
@@ -165,6 +166,14 @@ claude-mon daemon start
 | `y` | Copy prompt to clipboard |
 | `i` | Cycle injection method (tmux/OSC52/clipboard) |
 | `Ctrl+D` | Delete prompt |
+
+### Ralph Mode
+| Key | Action |
+|-----|--------|
+| **Auto-refresh** | State refreshes every 5 seconds automatically |
+| View loop status | Shows iteration progress and elapsed time |
+| Read prompt | Displays the current loop prompt |
+| See state path | Shows which state file is active |
 
 ### Version View Mode
 | Key | Action |
@@ -392,6 +401,8 @@ claude-mon-notify.sh
 
 ## Recent Enhancements
 
+- ✅ **Ralph Loop integration** with auto-refresh every 5 seconds
+- ✅ **Four-tab layout**: History, Prompts, Ralph, and Plan modes
 - ✅ **Comprehensive configuration system** with TOML support
 - ✅ **Automated data retention** with configurable cleanup policies
 - ✅ **Backup system** with periodic snapshots and compression

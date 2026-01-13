@@ -72,6 +72,11 @@ type leaderTimeoutMsg struct {
 	activatedAt time.Time // To verify we're timing out the right activation
 }
 
+// ralphRefreshTickMsg is sent to trigger Ralph state refresh
+type ralphRefreshTickMsg struct {
+	time.Time
+}
+
 // Change represents a single file change from Claude
 type Change struct {
 	Timestamp   time.Time
@@ -182,7 +187,8 @@ type Model struct {
 	toasts []Toast // Active toast notifications
 
 	// Ralph mode state
-	ralphState *ralph.State
+	ralphState      *ralph.State
+	ralphRefreshCmd tea.Cmd // Ticker for auto-refreshing Ralph state
 
 	// Plan generation
 	planInputActive bool            // Whether plan input is active
@@ -475,7 +481,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "3":
 			// Direct access to Ralph tab
 			m.switchToMode(LeftPaneModeRalph)
-			return m, nil
+			return m, m.ralphRefreshCmd
 		case "4":
 			// Direct access to Plan tab
 			m.switchToMode(LeftPaneModePlan)
@@ -614,6 +620,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.leaderActive && msg.activatedAt.Equal(m.leaderActivatedAt) {
 			logger.Log("Leader mode timed out")
 			m.leaderActive = false
+		}
+
+	case ralphRefreshTickMsg:
+		// Auto-refresh Ralph state when in Ralph mode
+		if m.leftPaneMode == LeftPaneModeRalph {
+			logger.Log("Auto-refreshing Ralph state")
+			m.loadRalphState()
+			// Return the command again to keep the ticker going
+			return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+				return ralphRefreshTickMsg{Time: t}
+			})
 		}
 
 	case chatCompletedMsg:
@@ -1256,7 +1273,7 @@ func (m Model) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "3":
 		m.switchToMode(LeftPaneModeRalph)
-		return m, nil
+		return m, m.ralphRefreshCmd
 	case "4":
 		m.switchToMode(LeftPaneModePlan)
 		return m, nil
@@ -1634,12 +1651,25 @@ func (m *Model) switchToMode(mode LeftPaneMode) {
 	m.activePane = PaneLeft
 	m.promptShowVersions = false
 
+	// Cancel Ralph refresh ticker when leaving Ralph mode
+	if prevMode == LeftPaneModeRalph && mode != LeftPaneModeRalph {
+		if m.ralphRefreshCmd != nil {
+			m.ralphRefreshCmd = nil
+			logger.Log("Cancelled Ralph refresh ticker")
+		}
+	}
+
 	// Mode-specific initialization
 	switch mode {
 	case LeftPaneModePrompts:
 		m.refreshPromptList()
 	case LeftPaneModeRalph:
 		m.loadRalphState()
+		// Start auto-refresh ticker (every 5 seconds)
+		m.ralphRefreshCmd = tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+			return ralphRefreshTickMsg{Time: t}
+		})
+		logger.Log("Started Ralph refresh ticker (5s interval)")
 	case LeftPaneModePlan:
 		m.loadPlanFile()
 	}
