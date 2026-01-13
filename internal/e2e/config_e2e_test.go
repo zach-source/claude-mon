@@ -282,6 +282,12 @@ max_limit = 50
 	}
 
 	t.Logf("Sending 20 edit events to daemon socket: %s", daemonSocket)
+
+	// Verify daemon socket exists
+	if _, err := os.Stat(daemonSocket); os.IsNotExist(err) {
+		t.Fatalf("Daemon socket does not exist: %s", daemonSocket)
+	}
+
 	for i := 0; i < 20; i++ {
 		editPayload := map[string]interface{}{
 			"type":           "edit",
@@ -319,6 +325,11 @@ max_limit = 50
 	time.Sleep(3 * time.Second)
 
 	t.Logf("Querying daemon socket: %s", querySocket)
+
+	// Verify query socket exists
+	if _, err := os.Stat(querySocket); os.IsNotExist(err) {
+		t.Fatalf("Query socket does not exist: %s", querySocket)
+	}
 
 	// Query without limit (should use default from config)
 	queryPayload := map[string]interface{}{
