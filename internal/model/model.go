@@ -1115,9 +1115,8 @@ func (m *Model) startChat(purpose chat.ContextPurpose) (Model, tea.Cmd) {
 		return *m, nil
 	}
 
-	// Start the chat subprocess with JSON streaming for structured input/output
-	// Empty initial prompt means we wait for user input first
-	if err := m.chat.StartJSON("", mcpConfigPath); err != nil {
+	// Start the chat subprocess with PTY (interactive mode)
+	if err := m.chat.Start(mcpConfigPath); err != nil {
 		m.addToast("Failed to start chat: "+err.Error(), ToastError)
 		m.chatActive = false
 		return *m, nil
@@ -1130,16 +1129,16 @@ func (m *Model) startChat(purpose chat.ContextPurpose) (Model, tea.Cmd) {
 	var toastMsg string
 	switch purpose {
 	case chat.ContextRalph:
-		toastMsg = "Ralph Loop chat started (JSON streaming)"
+		toastMsg = "Ralph Loop chat started (interactive PTY)"
 	case chat.ContextPrompt:
-		toastMsg = "Prompt chat started (JSON streaming)"
+		toastMsg = "Prompt chat started (interactive PTY)"
 	case chat.ContextPlan:
-		toastMsg = "Plan chat started (JSON streaming)"
+		toastMsg = "Plan chat started (interactive PTY)"
 	default:
-		toastMsg = "Chat started (JSON streaming, isolated session)"
+		toastMsg = "Chat started (interactive PTY, isolated session)"
 	}
 	m.addToast(toastMsg, ToastInfo)
-	logger.Log("Chat started in JSON streaming mode, purpose: %s", purpose)
+	logger.Log("Chat started in PTY mode, purpose: %s", purpose)
 
 	// Return with blink command and start listening for output
 	return *m, tea.Batch(textinput.Blink, m.waitForChatOutput())
