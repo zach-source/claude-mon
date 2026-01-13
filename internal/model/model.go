@@ -16,17 +16,17 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/ztaylor/claude-follow-tui/internal/chat"
-	"github.com/ztaylor/claude-follow-tui/internal/config"
-	"github.com/ztaylor/claude-follow-tui/internal/diff"
-	"github.com/ztaylor/claude-follow-tui/internal/highlight"
-	"github.com/ztaylor/claude-follow-tui/internal/history"
-	"github.com/ztaylor/claude-follow-tui/internal/logger"
-	"github.com/ztaylor/claude-follow-tui/internal/minimap"
-	"github.com/ztaylor/claude-follow-tui/internal/plan"
-	"github.com/ztaylor/claude-follow-tui/internal/prompt"
-	"github.com/ztaylor/claude-follow-tui/internal/ralph"
-	"github.com/ztaylor/claude-follow-tui/internal/theme"
+	"github.com/ztaylor/claude-mon/internal/chat"
+	"github.com/ztaylor/claude-mon/internal/config"
+	"github.com/ztaylor/claude-mon/internal/diff"
+	"github.com/ztaylor/claude-mon/internal/highlight"
+	"github.com/ztaylor/claude-mon/internal/history"
+	"github.com/ztaylor/claude-mon/internal/logger"
+	"github.com/ztaylor/claude-mon/internal/minimap"
+	"github.com/ztaylor/claude-mon/internal/plan"
+	"github.com/ztaylor/claude-mon/internal/prompt"
+	"github.com/ztaylor/claude-mon/internal/ralph"
+	"github.com/ztaylor/claude-mon/internal/theme"
 )
 
 // SocketMsg is sent when data is received from the socket
@@ -307,6 +307,10 @@ func New(socketPath string, opts ...Option) Model {
 				})
 			}
 			logger.Log("Loaded %d history entries", len(m.changes))
+			// Select most recent (last) item
+			if len(m.changes) > 0 {
+				m.selectedIndex = len(m.changes) - 1
+			}
 		}
 	}
 
@@ -426,8 +430,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			logger.Log("Leader mode activated")
 			m.leaderActive = true
 			m.leaderActivatedAt = time.Now()
-			// Start timeout - auto-dismiss after 2 seconds
-			return m, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+			// Start timeout - auto-dismiss after 4 seconds
+			return m, tea.Tick(4*time.Second, func(t time.Time) tea.Msg {
 				return leaderTimeoutMsg{activatedAt: m.leaderActivatedAt}
 			})
 		}
@@ -491,7 +495,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffViewport.SetContent(m.renderRightPane())
 			return m, nil
 		case m.config.Keys.ToggleChat:
-			return m.startChat()
+			mCopy := m
+			result, _ := mCopy.startChat(chat.ContextGeneral)
+			return result, nil
 		case m.config.Keys.Quit:
 			return m, tea.Quit
 		}
@@ -552,12 +558,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-			// If this is the first change, select it
-			if len(m.changes) == 1 {
-				m.selectedIndex = 0
-				m.diffViewport.SetContent(m.renderDiff())
-			}
-			// Otherwise keep current position - user can press 'n' to see new items
+			// Select the newly added change (most recent)
+			m.selectedIndex = len(m.changes) - 1
+			m.scrollX = 0
+			m.diffViewport.SetContent(m.renderDiff())
 		} else {
 			logger.Log("parsePayload returned nil")
 		}
@@ -620,7 +624,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatOutputMsg:
 		// New output from chat - continue listening for more
-		logger.Log("Received chat output: %d bytes", len(msg.output))
+		logger.Log("Received chat output: %v", msg.output)
+
+		// Handle both raw text and JSON events
+		// The chat.ClaudeChat accumulates output in its output builder,
+		// so we just update the viewport with the current accumulated content
+		if m.chat != nil {
+			// Update viewport with accumulated output
+			m.chatViewport.SetContent(m.chat.Output())
+			// Auto-scroll to bottom
+			m.chatViewport.GotoBottom()
+		}
+
 		if m.chatActive && m.chat != nil {
 			return m, m.waitForChatOutput()
 		}
@@ -890,6 +905,11 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Cycle injection method
 		m.promptInjectMethod = (m.promptInjectMethod + 1) % 3
 		m.addToast(fmt.Sprintf("Inject method: %s", prompt.MethodName(m.promptInjectMethod)), ToastInfo)
+	case m.config.Keys.ChatPrompt:
+		// Start Prompt-specific chat
+		mCopy := m
+		result, _ := mCopy.startChat(chat.ContextPrompt)
+		return result, nil
 	}
 	return m, nil
 }
@@ -919,6 +939,11 @@ func (m Model) handleRalphKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Refresh Ralph state
 		m.loadRalphState()
 		m.diffViewport.SetContent(m.renderRightPane())
+	case m.config.Keys.ChatRalph:
+		// Start Ralph-specific chat
+		mCopy := m
+		result, _ := mCopy.startChat(chat.ContextRalph)
+		return result, nil
 	}
 	return m, nil
 }
@@ -989,6 +1014,11 @@ func (m Model) handlePlanKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loadPlanFile()
 		m.diffViewport.SetContent(m.renderRightPane())
 		m.addToast("Plan refreshed", ToastInfo)
+	case m.config.Keys.ChatPlan:
+		// Start Plan-specific chat
+		mCopy := m
+		result, _ := mCopy.startChat(chat.ContextPlan)
+		return result, nil
 	}
 	return m, nil
 }
@@ -1005,10 +1035,13 @@ func (m Model) generatePlan(description string) tea.Cmd {
 	}
 }
 
-// startChat starts a new chat session
-func (m *Model) startChat() (Model, tea.Cmd) {
+// startChat starts a new chat session with a specific purpose
+func (m *Model) startChat(purpose chat.ContextPurpose) (Model, tea.Cmd) {
 	m.chatActive = true
 	m.chat = chat.New()
+
+	// Set the purpose before starting
+	m.chat.SetPurpose(purpose)
 
 	// Write MCP config for chat
 	mcpConfigPath, err := plan.WriteMCPConfig()
@@ -1018,28 +1051,31 @@ func (m *Model) startChat() (Model, tea.Cmd) {
 		return *m, nil
 	}
 
-	// Start the chat subprocess (fresh session, doesn't pollute main chat)
-	if err := m.chat.Start(mcpConfigPath); err != nil {
+	// Start the chat subprocess with JSON streaming for structured input/output
+	// Empty initial prompt means we wait for user input first
+	if err := m.chat.StartJSON("", mcpConfigPath); err != nil {
 		m.addToast("Failed to start chat: "+err.Error(), ToastError)
 		m.chatActive = false
 		return *m, nil
 	}
 
-	// Set PTY size based on overlay dimensions (80% of screen)
-	rows := int(float64(m.height) * 0.8)
-	cols := int(float64(m.width) * 0.8)
-	if rows < 24 {
-		rows = 24
-	}
-	if cols < 80 {
-		cols = 80
-	}
-	m.chat.SetSize(rows, cols)
-
 	// Focus the chat input
 	m.chatInput.Focus()
-	m.addToast("Chat started (isolated session)", ToastInfo)
-	logger.Log("Chat started in interactive mode, listening for output")
+
+	// Context-specific toast message
+	var toastMsg string
+	switch purpose {
+	case chat.ContextRalph:
+		toastMsg = "Ralph Loop chat started (JSON streaming)"
+	case chat.ContextPrompt:
+		toastMsg = "Prompt chat started (JSON streaming)"
+	case chat.ContextPlan:
+		toastMsg = "Plan chat started (JSON streaming)"
+	default:
+		toastMsg = "Chat started (JSON streaming, isolated session)"
+	}
+	m.addToast(toastMsg, ToastInfo)
+	logger.Log("Chat started in JSON streaming mode, purpose: %s", purpose)
 
 	// Return with blink command and start listening for output
 	return *m, tea.Batch(textinput.Blink, m.waitForChatOutput())
@@ -1047,9 +1083,12 @@ func (m *Model) startChat() (Model, tea.Cmd) {
 
 // startChatWithObjective starts chat in objective mode (like Ralph)
 // The chat will auto-close when the objective is completed
-func (m *Model) startChatWithObjective(objective string) (Model, tea.Cmd) {
+func (m *Model) startChatWithObjective(objective string, purpose chat.ContextPurpose) (Model, tea.Cmd) {
 	m.chatActive = true
 	m.chat = chat.New()
+
+	// Set the purpose before starting
+	m.chat.SetPurpose(purpose)
 
 	// Write MCP config for chat
 	mcpConfigPath, err := plan.WriteMCPConfig()
@@ -1078,7 +1117,7 @@ func (m *Model) startChatWithObjective(objective string) (Model, tea.Cmd) {
 	m.chat.SetSize(rows, cols)
 
 	m.addToast("Running objective...", ToastInfo)
-	logger.Log("Chat started in objective mode: %s", objective)
+	logger.Log("Chat started in objective mode: %s, purpose: %s", objective, purpose)
 
 	// Start listening for both output and completion
 	return *m, tea.Batch(m.waitForChatOutput(), m.waitForChatCompletion())
@@ -1089,7 +1128,7 @@ type chatCompletedMsg struct{}
 
 // chatOutputMsg signals new output from chat
 type chatOutputMsg struct {
-	output string
+	output interface{} // Can be string (raw text) or chat.JSONEvent (structured)
 }
 
 // waitForChatCompletion returns a command that waits for chat completion
@@ -1153,7 +1192,9 @@ func (m Model) handleChatKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Send message
 		input := m.chatInput.Value()
 		if input != "" && m.chat != nil {
-			if err := m.chat.Send(input); err != nil {
+			// JSON streaming mode is disabled, always use PTY Send()
+			err := m.chat.Send(input)
+			if err != nil {
 				m.addToast("Failed to send: "+err.Error(), ToastError)
 			}
 			m.chatInput.Reset()
@@ -1202,7 +1243,9 @@ func (m Model) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "c":
 		if !m.chatActive {
-			return m.startChat()
+			mCopy := m
+			result, _ := mCopy.startChat(chat.ContextGeneral)
+			return result, nil
 		}
 		return m, nil
 	case "1":
@@ -1361,7 +1404,7 @@ func (m Model) handleLeaderKeyPrompts(key string) (tea.Model, tea.Cmd) {
 		if len(m.promptList) > 0 {
 			p := m.promptList[m.promptSelected]
 			expanded := m.expandPromptVariables(p.Content)
-			return m.startChatWithObjective(expanded)
+			return m.startChatWithObjective(expanded, chat.ContextPrompt)
 		}
 	}
 	return m, nil
@@ -1407,7 +1450,7 @@ func (m Model) handleLeaderKeyPlan(key string) (tea.Model, tea.Cmd) {
 		if m.planPath != "" && m.planContent != "" {
 			// Use plan content as objective
 			objective := fmt.Sprintf("Execute this plan:\n\n%s", m.planContent)
-			return m.startChatWithObjective(objective)
+			return m.startChatWithObjective(objective, chat.ContextPlan)
 		} else {
 			m.addToast("No plan loaded", ToastWarning)
 		}
@@ -1628,24 +1671,23 @@ func (m Model) renderTabBar() string {
 		mode LeftPaneMode
 		icon string
 	}{
-		{"1", "History", LeftPaneModeHistory, ""},
-		{"2", "Prompts", LeftPaneModePrompts, ""},
+		{"1", "History", LeftPaneModeHistory, "📜"},
+		{"2", "Prompts", LeftPaneModePrompts, "📝"},
 		{"3", "Ralph", LeftPaneModeRalph, "🔄"},
 		{"4", "Plan", LeftPaneModePlan, "📋"},
 	}
 
 	var parts []string
 	for _, tab := range tabs {
-		label := tab.num + ":" + tab.name
-		if tab.icon != "" {
-			label = tab.num + ":" + tab.icon
-		}
-
 		if tab.mode == m.leftPaneMode {
-			// Active tab - highlighted
+			// Active tab - show full name, highlighted
+			label := tab.num + ":" + tab.name
 			parts = append(parts, m.theme.Selected.Render("["+label+"]"))
 		} else {
-			// Inactive tab - show state indicator
+			// Inactive tab - show icon only
+			label := tab.num + ":" + tab.icon
+
+			// Add state indicator for active states
 			stateIndicator := ""
 			switch tab.mode {
 			case LeftPaneModeRalph:
@@ -1778,27 +1820,13 @@ func (m Model) View() string {
 	// Render header with tab bar
 	tabBar := m.renderTabBar()
 
-	// Queue position indicator (only in history mode)
-	queueIndicator := ""
-	if m.leftPaneMode == LeftPaneModeHistory && len(m.changes) > 0 {
-		queueIndicator = m.theme.Selected.Render(fmt.Sprintf(" [%d/%d]", m.selectedIndex+1, len(m.changes)))
-	}
-
 	// Refining status indicator
 	refineIndicator := ""
 	if m.promptRefining {
 		refineIndicator = m.theme.Selected.Render(" ⏳ Refining...")
 	}
 
-	// Plan indicator (show active plan file name)
-	planIndicator := ""
-	if m.planPath != "" {
-		planName := strings.TrimSuffix(filepath.Base(m.planPath), ".md")
-		planIndicator = m.theme.Dim.Render(" 📋 " + planName)
-	}
-
-	header := m.theme.Title.Render("Claude Follow") + " " + tabBar + queueIndicator + refineIndicator + planIndicator + "  " +
-		m.theme.Dim.Render(time.Now().Format("15:04:05"))
+	header := m.theme.Title.Render("claude-mon") + " " + tabBar + refineIndicator
 	header = lipgloss.PlaceHorizontal(m.width, lipgloss.Left, header)
 
 	// Two-pane layout
@@ -2027,7 +2055,9 @@ func (m Model) renderHistory() string {
 	// Track current commit for grouping
 	currentCommit := ""
 
-	for i, change := range m.changes {
+	// Iterate in reverse to show newest on top
+	for i := len(m.changes) - 1; i >= 0; i-- {
+		change := m.changes[i]
 		// Show commit header when commit changes
 		if change.CommitShort != "" && change.CommitShort != currentCommit {
 			currentCommit = change.CommitShort
@@ -2609,7 +2639,7 @@ func (m Model) renderHelp() string {
 	k := m.config.Keys
 	var help strings.Builder
 
-	help.WriteString("\n  Claude Follow TUI - Help\n\n")
+	help.WriteString("\n  claude-mon TUI - Help\n\n")
 
 	// Global section (always shown)
 	help.WriteString("  === Global ===\n")
@@ -2654,7 +2684,8 @@ func (m Model) renderHelp() string {
 			help.WriteString(fmt.Sprintf("    %-14s Delete prompt\n", k.DeletePrompt))
 			help.WriteString(fmt.Sprintf("    %-14s Yank (copy to clipboard)\n", k.YankPrompt))
 			help.WriteString(fmt.Sprintf("    %-14s Cycle inject method\n", k.InjectMethod))
-			help.WriteString(fmt.Sprintf("    %-14s Inject prompt\n\n", k.SendPrompt))
+			help.WriteString(fmt.Sprintf("    %-14s Inject prompt\n", k.SendPrompt))
+			help.WriteString(fmt.Sprintf("    %-14s Open Prompt chat\n\n", k.ChatPrompt))
 		}
 
 	case LeftPaneModeRalph:
@@ -2663,6 +2694,7 @@ func (m Model) renderHelp() string {
 			help.WriteString(fmt.Sprintf("    %-14s Cancel Ralph loop\n", k.CancelRalph))
 		}
 		help.WriteString(fmt.Sprintf("    %-14s Refresh status\n", k.Refresh))
+		help.WriteString(fmt.Sprintf("    %-14s Open Ralph chat\n", k.ChatRalph))
 		help.WriteString(fmt.Sprintf("    %-14s Scroll prompt\n\n", k.Down+"/"+k.Up))
 
 	case LeftPaneModePlan:
@@ -2672,6 +2704,7 @@ func (m Model) renderHelp() string {
 			help.WriteString(fmt.Sprintf("    %-14s Edit plan in nvim\n", k.EditPlan))
 		}
 		help.WriteString(fmt.Sprintf("    %-14s Refresh plan\n", k.Refresh))
+		help.WriteString(fmt.Sprintf("    %-14s Open Plan chat\n", k.ChatPlan))
 		help.WriteString(fmt.Sprintf("    %-14s Scroll plan content\n\n", k.Down+"/"+k.Up+"/"+k.PageDown+"/"+k.PageUp))
 	}
 
@@ -2740,12 +2773,14 @@ func (m Model) renderWhichKey() string {
 				{Key: "i", Description: "injection method"},
 				{Key: "⏎", Description: "inject prompt"},
 				{Key: "s", Description: "run as objective"},
+				{Key: "P", Description: "prompt chat"},
 			}
 		case LeftPaneModeRalph:
 			context = "RALPH LOOP"
 			contextItems = []WhichKeyItem{
 				{Key: "C", Description: "cancel loop"},
 				{Key: "r", Description: "refresh status"},
+				{Key: "R", Description: "ralph chat"},
 			}
 		case LeftPaneModePlan:
 			context = "PLAN"
@@ -2754,6 +2789,7 @@ func (m Model) renderWhichKey() string {
 				{Key: "e", Description: "edit in nvim"},
 				{Key: "r", Description: "refresh view"},
 				{Key: "s", Description: "run plan"},
+				{Key: "A", Description: "plan chat"},
 			}
 		}
 	}

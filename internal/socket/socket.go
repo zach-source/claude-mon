@@ -37,7 +37,7 @@ func GetSocketPath() string {
 		user = "unknown"
 	}
 
-	return fmt.Sprintf("/tmp/claude-follow-tui-%s-%s.sock", user, hashStr)
+	return fmt.Sprintf("/tmp/claude-mon-%s-%s.sock", user, hashStr)
 }
 
 // Listener handles incoming socket connections

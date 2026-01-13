@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TUI_BIN="${SCRIPT_DIR}/../claude-follow-tui"
+TUI_BIN="${SCRIPT_DIR}/../bin/claude-mon"
 
 if [[ ! -x "$TUI_BIN" ]]; then
     echo "Error: TUI binary not found. Run 'make build' first."

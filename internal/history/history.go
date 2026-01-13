@@ -44,8 +44,8 @@ func GetHistoryPath() string {
 		cwd = "."
 	}
 
-	// Use .claude-follow-history.json in the workspace root
-	return filepath.Join(cwd, ".claude-follow-history.json")
+	// Use .claude-mon-history.json in the workspace root
+	return filepath.Join(cwd, ".claude-mon-history.json")
 }
 
 // Load reads history from the file

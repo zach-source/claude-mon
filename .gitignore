@@ -1,6 +1,6 @@
 # Binaries
 bin/
-/claude-follow-tui
+/claude-mon
 *.exe
 
 # Test output

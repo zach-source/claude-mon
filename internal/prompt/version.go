@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ztaylor/claude-follow-tui/internal/logger"
+	"github.com/ztaylor/claude-mon/internal/logger"
 )
 
 // CreateVersion creates a versioned backup of a prompt

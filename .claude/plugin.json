@@ -1,0 +1,8 @@
+{
+  "name": "claude-follow-tui",
+  "version": "1.0.0",
+  "description": "Real-time TUI display of Claude Code tool usage",
+  "hooks": {
+    "PostToolUse": "hooks/PostToolUse"
+  }
+}

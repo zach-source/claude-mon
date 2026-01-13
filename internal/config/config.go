@@ -68,6 +68,11 @@ type KeyBindings struct {
 	CloseChat string `toml:"close_chat"`
 	KillChat  string `toml:"kill_chat"`
 	ClearChat string `toml:"clear_chat"`
+
+	// Context-aware chat keys
+	ChatRalph  string `toml:"chat_ralph"`  // Open Ralph chat
+	ChatPrompt string `toml:"chat_prompt"` // Open Prompt chat
+	ChatPlan   string `toml:"chat_plan"`   // Open Plan chat
 }
 
 // DefaultConfig returns a config with default values
@@ -128,6 +133,11 @@ func DefaultConfig() *Config {
 			CloseChat: "esc",
 			KillChat:  "ctrl+c",
 			ClearChat: "ctrl+l",
+
+			// Context-aware chat
+			ChatRalph:  "R", // Open Ralph Loop chat
+			ChatPrompt: "P", // Open Prompt chat
+			ChatPlan:   "A", // Open Plan chat (A for "Ask about plan")
 		},
 	}
 }
@@ -179,8 +189,8 @@ func WriteDefault() error {
 		return err
 	}
 
-	defaultConfig := `# Claude Follow TUI Configuration
-# Location: ~/.config/claude-follow/config.toml
+	defaultConfig := `# claude-mon TUI Configuration
+# Location: ~/.config/claude-mon/config.toml
 
 # Theme: dark, light, dracula, monokai, gruvbox, nord, catppuccin
 theme = "dark"

@@ -12,8 +12,8 @@ func TestGetSocketPath(t *testing.T) {
 	path := GetSocketPath()
 
 	// Should start with /tmp/
-	if !strings.HasPrefix(path, "/tmp/claude-follow-tui-") {
-		t.Errorf("socket path should start with /tmp/claude-follow-tui-, got: %s", path)
+	if !strings.HasPrefix(path, "/tmp/claude-mon-") {
+		t.Errorf("socket path should start with /tmp/claude-mon-, got: %s", path)
 	}
 
 	// Should end with .sock
@@ -30,7 +30,7 @@ func TestGetSocketPath(t *testing.T) {
 
 func TestListenerCreateAndClose(t *testing.T) {
 	// Use a unique test socket
-	socketPath := "/tmp/claude-follow-tui-test.sock"
+	socketPath := "/tmp/claude-mon-test.sock"
 	defer os.Remove(socketPath)
 
 	listener, err := NewListener(socketPath)
@@ -56,7 +56,7 @@ func TestListenerCreateAndClose(t *testing.T) {
 }
 
 func TestListenerReceiveMessage(t *testing.T) {
-	socketPath := "/tmp/claude-follow-tui-test-msg.sock"
+	socketPath := "/tmp/claude-mon-test-msg.sock"
 	defer os.Remove(socketPath)
 
 	listener, err := NewListener(socketPath)

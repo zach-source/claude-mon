@@ -1,0 +1,30 @@
+#!/bin/bash
+# claude-follow-tui PostToolUse hook
+# Sends tool edits to the TUI for real-time display
+
+# Get the current directory and resolve to absolute path
+CWD="$(cd "$(pwd)" && pwd)"
+
+# Resolve symlinks (macOS compatible)
+if command -v realpath &>/dev/null; then
+    CWD="$(realpath "$CWD")"
+elif [[ "$(uname)" == "Darwin" ]]; then
+    # macOS: use perl to resolve symlinks
+    CWD="$(perl -MCwd -e 'print Cwd::realpath($ARGV[0])' "$CWD")"
+else
+    CWD="$(readlink -f "$CWD")"
+fi
+
+# Hash the path (matching Go's sha256.Sum256[:12])
+HASH="$(echo -n "$CWD" | sha256sum | cut -c1-12)"
+
+# Get username
+USER="${USER:-unknown}"
+
+# Socket path
+SOCKET_PATH="/tmp/claude-follow-tui-${USER}-${HASH}.sock"
+
+# Send to TUI if socket exists
+if [[ -S "$SOCKET_PATH" ]]; then
+    echo "$TOOL_INPUT" | nc -U "$SOCKET_PATH" &
+fi

@@ -6,7 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sergi/go-diff/diffmatchpatch"
-	"github.com/ztaylor/claude-follow-tui/internal/theme"
+	"github.com/ztaylor/claude-mon/internal/theme"
 )
 
 // DiffLine represents a single line in the formatted diff

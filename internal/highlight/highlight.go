@@ -8,7 +8,7 @@ import (
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/ztaylor/claude-follow-tui/internal/theme"
+	"github.com/ztaylor/claude-mon/internal/theme"
 )
 
 // Highlighter provides syntax highlighting for code

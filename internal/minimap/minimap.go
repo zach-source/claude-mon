@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/ztaylor/claude-follow-tui/internal/theme"
+	"github.com/ztaylor/claude-mon/internal/theme"
 )
 
 // LineType represents the type of a line for minimap coloring

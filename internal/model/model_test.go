@@ -143,18 +143,23 @@ func TestModelNavigation(t *testing.T) {
 		t.Fatalf("expected 3 changes, got %d", len(model.changes))
 	}
 
-	// Test navigation down (default key: j)
-	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	model = tm.(Model)
-	if model.selectedIndex != 1 {
-		t.Errorf("expected selected index 1 after j, got %d", model.selectedIndex)
+	// New behavior: most recent (last) item is selected by default
+	if model.selectedIndex != 2 {
+		t.Errorf("expected selected index 2 (most recent), got %d", model.selectedIndex)
 	}
 
 	// Test navigation up (default key: k)
 	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
 	model = tm.(Model)
-	if model.selectedIndex != 0 {
-		t.Errorf("expected selected index 0 after k, got %d", model.selectedIndex)
+	if model.selectedIndex != 1 {
+		t.Errorf("expected selected index 1 after k, got %d", model.selectedIndex)
+	}
+
+	// Test navigation down (default key: j)
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model = tm.(Model)
+	if model.selectedIndex != 2 {
+		t.Errorf("expected selected index 2 after j, got %d", model.selectedIndex)
 	}
 
 	// Test pane switching with ] (default key for RightPane)
