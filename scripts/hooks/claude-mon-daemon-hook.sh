@@ -23,12 +23,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_PATH="${WORKSPACE_PATH:-$(pwd)}"
 WORKSPACE_NAME="${WORKSPACE_NAME:-$(basename "$WORKSPACE_PATH")}"
 
-# Get git info
-BRANCH=""
-COMMIT_SHA=""
-if git rev-parse --git-dir > /dev/null 2>&1; then
-	BRANCH=$(git branch --show-current 2>/dev/null || echo "")
-	COMMIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
+# Get git info (only if not already set)
+: "${BRANCH:=}"
+: "${COMMIT_SHA:=}"
+
+if [[ -z "$BRANCH" ]] || [[ -z "$COMMIT_SHA" ]]; then
+	if git rev-parse --git-dir > /dev/null 2>&1; then
+		: "${BRANCH:=$(git branch --show-current 2>/dev/null || echo '')}"
+		: "${COMMIT_SHA:=$(git rev-parse HEAD 2>/dev/null || echo '')}"
+	fi
 fi
 
 # Function to send data to daemon
@@ -86,12 +89,12 @@ case "$COMMAND" in
 			PAYLOAD=$(cat <<EOF
 {
 	"type": "edit",
-	"workspace": "$WORKSPACE_PATH",
-	"workspace_name": "$WORKSPACE_NAME",
-	"branch": "$BRANCH",
-	"commit_sha": "$COMMIT_SHA",
-	"tool_name": "$TOOL_NAME",
-	"file_path": "$FILE_PATH",
+	"workspace": $(echo "$WORKSPACE_PATH" | jq -Rs .),
+	"workspace_name": $(echo "$WORKSPACE_NAME" | jq -Rs .),
+	"branch": $(echo "$BRANCH" | jq -Rs .),
+	"commit_sha": $(echo "$COMMIT_SHA" | jq -Rs .),
+	"tool_name": $(echo "$TOOL_NAME" | jq -Rs .),
+	"file_path": $(echo "$FILE_PATH" | jq -Rs .),
 	"old_string": $(echo "$OLD_STRING" | jq -Rs .),
 	"new_string": $(echo "$NEW_STRING" | jq -Rs .),
 	"line_num": $LINE_NUM,
@@ -105,10 +108,10 @@ EOF
 
 	prompt)
 		# Record prompt creation/update
-		PROMPT_NAME="${2:-}"
-		PROMPT_DESC="${3:-}"
-		PROMPT_CONTENT="${4:-}"
-		PROMPT_TAGS="${5:-}"
+		PROMPT_NAME="${1:-}"
+		PROMPT_DESC="${2:-}"
+		PROMPT_CONTENT="${3:-}"
+		PROMPT_TAGS="${4:-}"
 
 		if [[ -z "$PROMPT_NAME" ]] || [[ -z "$PROMPT_CONTENT" ]]; then
 			echo "Error: prompt name and content required" >&2
@@ -123,8 +126,8 @@ EOF
 	"workspace_name": "$WORKSPACE_NAME",
 	"branch": "$BRANCH",
 	"commit_sha": "$COMMIT_SHA",
-	"prompt_name": "$PROMPT_NAME",
-	"prompt_description": "$PROMPT_DESC",
+	"prompt_name": $(echo "$PROMPT_NAME" | jq -Rs .),
+	"prompt_description": $(echo "$PROMPT_DESC" | jq -Rs .),
 	"new_string": $(echo "$PROMPT_CONTENT" | jq -Rs .),
 	"prompt_tags": $(echo "$PROMPT_TAGS" | jq -R '. | split(" ")' 2>/dev/null || echo "[]")
 }

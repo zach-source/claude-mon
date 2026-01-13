@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS prompts (
     is_global BOOLEAN DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL,
+    UNIQUE(name, session_id)
 );
 
 CREATE TABLE IF NOT EXISTS prompt_versions (
