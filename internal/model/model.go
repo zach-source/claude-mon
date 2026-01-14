@@ -16,7 +16,6 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/ztaylor/claude-mon/internal/chat"
 	"github.com/ztaylor/claude-mon/internal/config"
 	"github.com/ztaylor/claude-mon/internal/diff"
 	"github.com/ztaylor/claude-mon/internal/highlight"
@@ -202,12 +201,6 @@ type Model struct {
 	planInput       textinput.Model // Plan description input
 	planGenerating  bool            // Whether plan is being generated
 
-	// Claude chat
-	chatActive   bool             // Whether chat panel is active
-	chat         *chat.ClaudeChat // Chat subprocess manager
-	chatInput    textinput.Model  // Chat input field
-	chatViewport viewport.Model   // Chat output viewport
-
 	// Layout
 	hideLeftPane bool // Toggle left pane visibility
 
@@ -340,13 +333,6 @@ func New(socketPath string, opts ...Option) Model {
 	ti.Width = 60
 	m.planInput = ti
 
-	// Initialize chat input
-	chatTi := textinput.New()
-	chatTi.Placeholder = "Type a message..."
-	chatTi.CharLimit = 1000
-	chatTi.Width = 60
-	m.chatInput = chatTi
-
 	// Initialize prompt refine input
 	refineTi := textinput.New()
 	refineTi.Placeholder = "What do you want to improve?"
@@ -360,11 +346,6 @@ func New(socketPath string, opts ...Option) Model {
 // Init implements tea.Model
 func (m Model) Init() tea.Cmd {
 	return nil
-}
-
-// ChatActive returns whether chat mode is currently active
-func (m Model) ChatActive() bool {
-	return m.chatActive
 }
 
 // LeaderActivatedAt returns when leader mode was activated
@@ -456,11 +437,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 
-		// Handle chat mode keys FIRST - chat captures all input except leader key
-		if m.chatActive {
-			return m.handleChatKeys(msg)
-		}
-
 		// Global keys (work in any mode when chat is NOT active)
 		switch key {
 		case m.config.Keys.Help:
@@ -514,10 +490,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateViewportSize()
 			m.diffViewport.SetContent(m.renderRightPane())
 			return m, nil
-		case m.config.Keys.ToggleChat:
-			mCopy := m
-			result, _ := mCopy.startChat(chat.ContextGeneral)
-			return result, nil
 		case m.config.Keys.Quit:
 			return m, tea.Quit
 		}
@@ -651,30 +623,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
 				return ralphRefreshTickMsg{Time: t}
 			})
-		}
-
-	case chatCompletedMsg:
-		// Objective-based chat completed - auto-close
-		logger.Log("Chat objective completed")
-		m.stopChat()
-		m.addToast("Objective completed", ToastSuccess)
-
-	case chatOutputMsg:
-		// New output from chat - continue listening for more
-		logger.Log("Received chat output: %v", msg.output)
-
-		// Handle both raw text and JSON events
-		// The chat.ClaudeChat accumulates output in its output builder,
-		// so we just update the viewport with the current accumulated content
-		if m.chat != nil {
-			// Update viewport with accumulated output
-			m.chatViewport.SetContent(m.chat.Output())
-			// Auto-scroll to bottom
-			m.chatViewport.GotoBottom()
-		}
-
-		if m.chatActive && m.chat != nil {
-			return m, m.waitForChatOutput()
 		}
 	}
 
@@ -969,11 +917,6 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Cycle injection method
 		m.promptInjectMethod = (m.promptInjectMethod + 1) % 2
 		m.addToast(fmt.Sprintf("Inject method: %s", prompt.MethodName(m.promptInjectMethod)), ToastInfo)
-	case m.config.Keys.ChatPrompt:
-		// Start Prompt-specific chat
-		mCopy := m
-		result, _ := mCopy.startChat(chat.ContextPrompt)
-		return result, nil
 	}
 	return m, nil
 }
@@ -1003,11 +946,6 @@ func (m Model) handleRalphKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Refresh Ralph state
 		m.loadRalphState()
 		m.diffViewport.SetContent(m.renderRightPane())
-	case m.config.Keys.ChatRalph:
-		// Start Ralph-specific chat
-		mCopy := m
-		result, _ := mCopy.startChat(chat.ContextRalph)
-		return result, nil
 	}
 	return m, nil
 }
@@ -1078,11 +1016,6 @@ func (m Model) handlePlanKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loadPlanFile()
 		m.diffViewport.SetContent(m.renderRightPane())
 		m.addToast("Plan refreshed", ToastInfo)
-	case m.config.Keys.ChatPlan:
-		// Start Plan-specific chat
-		mCopy := m
-		result, _ := mCopy.startChat(chat.ContextPlan)
-		return result, nil
 	}
 	return m, nil
 }
@@ -1096,178 +1029,6 @@ func (m Model) generatePlan(description string) tea.Cmd {
 		}
 		slug := strings.TrimSuffix(filepath.Base(path), ".md")
 		return planGeneratedMsg{path: path, slug: slug}
-	}
-}
-
-// startChat starts a new chat session with a specific purpose
-func (m *Model) startChat(purpose chat.ContextPurpose) (Model, tea.Cmd) {
-	m.chatActive = true
-	m.chat = chat.New()
-
-	// Set the purpose before starting
-	m.chat.SetPurpose(purpose)
-
-	// Write MCP config for chat
-	mcpConfigPath, err := plan.WriteMCPConfig()
-	if err != nil {
-		m.addToast("Failed to write MCP config: "+err.Error(), ToastError)
-		m.chatActive = false
-		return *m, nil
-	}
-
-	// Start the chat subprocess with PTY (interactive mode)
-	if err := m.chat.Start(mcpConfigPath); err != nil {
-		m.addToast("Failed to start chat: "+err.Error(), ToastError)
-		m.chatActive = false
-		return *m, nil
-	}
-
-	// Focus the chat input
-	m.chatInput.Focus()
-
-	// Context-specific toast message
-	var toastMsg string
-	switch purpose {
-	case chat.ContextRalph:
-		toastMsg = "Ralph Loop chat started (interactive PTY)"
-	case chat.ContextPrompt:
-		toastMsg = "Prompt chat started (interactive PTY)"
-	case chat.ContextPlan:
-		toastMsg = "Plan chat started (interactive PTY)"
-	default:
-		toastMsg = "Chat started (interactive PTY, isolated session)"
-	}
-	m.addToast(toastMsg, ToastInfo)
-	logger.Log("Chat started in PTY mode, purpose: %s", purpose)
-
-	// Return with blink command and start listening for output
-	return *m, tea.Batch(textinput.Blink, m.waitForChatOutput())
-}
-
-// startChatWithObjective starts chat in objective mode (like Ralph)
-// The chat will auto-close when the objective is completed
-func (m *Model) startChatWithObjective(objective string, purpose chat.ContextPurpose) (Model, tea.Cmd) {
-	m.chatActive = true
-	m.chat = chat.New()
-
-	// Set the purpose before starting
-	m.chat.SetPurpose(purpose)
-
-	// Write MCP config for chat
-	mcpConfigPath, err := plan.WriteMCPConfig()
-	if err != nil {
-		m.addToast("Failed to write MCP config: "+err.Error(), ToastError)
-		m.chatActive = false
-		return *m, nil
-	}
-
-	// Start chat with objective (non-interactive, auto-completes)
-	if err := m.chat.StartWithObjective(objective, mcpConfigPath); err != nil {
-		m.addToast("Failed to start objective chat: "+err.Error(), ToastError)
-		m.chatActive = false
-		return *m, nil
-	}
-
-	// Set PTY size based on overlay dimensions (80% of screen)
-	rows := int(float64(m.height) * 0.8)
-	cols := int(float64(m.width) * 0.8)
-	if rows < 24 {
-		rows = 24
-	}
-	if cols < 80 {
-		cols = 80
-	}
-	m.chat.SetSize(rows, cols)
-
-	m.addToast("Running objective...", ToastInfo)
-	logger.Log("Chat started in objective mode: %s, purpose: %s", objective, purpose)
-
-	// Start listening for both output and completion
-	return *m, tea.Batch(m.waitForChatOutput(), m.waitForChatCompletion())
-}
-
-// chatCompletedMsg signals that objective-based chat has completed
-type chatCompletedMsg struct{}
-
-// chatOutputMsg signals new output from chat
-type chatOutputMsg struct {
-	output interface{} // Can be string (raw text) or chat.JSONEvent (structured)
-}
-
-// waitForChatCompletion returns a command that waits for chat completion
-func (m *Model) waitForChatCompletion() tea.Cmd {
-	return func() tea.Msg {
-		if m.chat == nil {
-			return nil
-		}
-		<-m.chat.CompletedChan()
-		return chatCompletedMsg{}
-	}
-}
-
-// waitForChatOutput returns a command that waits for chat output
-func (m *Model) waitForChatOutput() tea.Cmd {
-	return func() tea.Msg {
-		if m.chat == nil {
-			return nil
-		}
-		select {
-		case output, ok := <-m.chat.OutputChan():
-			if !ok {
-				return nil // Channel closed
-			}
-			return chatOutputMsg{output: output}
-		case <-m.chat.DoneChan():
-			return nil // Chat ended
-		}
-	}
-}
-
-// stopChat stops the chat session
-func (m *Model) stopChat() {
-	if m.chat != nil {
-		m.chat.Stop()
-	}
-	m.chatActive = false
-	m.chatInput.Blur()
-	m.chatInput.Reset()
-	m.addToast("Chat closed", ToastInfo)
-}
-
-// handleChatKeys handles key events when chat is active
-func (m Model) handleChatKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case m.config.Keys.CloseChat:
-		// Close chat
-		m.stopChat()
-		return m, nil
-	case m.config.Keys.KillChat:
-		// Kill chat and close
-		m.stopChat()
-		return m, nil
-	case m.config.Keys.ClearChat:
-		// Clear chat output
-		if m.chat != nil {
-			m.chat.ClearOutput()
-		}
-		return m, nil
-	case m.config.Keys.SendChat:
-		// Send message
-		input := m.chatInput.Value()
-		if input != "" && m.chat != nil {
-			// JSON streaming mode is disabled, always use PTY Send()
-			err := m.chat.Send(input)
-			if err != nil {
-				m.addToast("Failed to send: "+err.Error(), ToastError)
-			}
-			m.chatInput.Reset()
-		}
-		return m, nil
-	default:
-		// Forward to chat input
-		var cmd tea.Cmd
-		m.chatInput, cmd = m.chatInput.Update(msg)
-		return m, cmd
 	}
 }
 
@@ -1303,13 +1064,6 @@ func (m Model) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showMinimap = !m.showMinimap
 		m.updateViewportSize()
 		m.diffViewport.SetContent(m.renderRightPane())
-		return m, nil
-	case "c":
-		if !m.chatActive {
-			mCopy := m
-			result, _ := mCopy.startChat(chat.ContextGeneral)
-			return result, nil
-		}
 		return m, nil
 	case "1":
 		m.switchToMode(LeftPaneModeHistory)
@@ -1463,12 +1217,6 @@ func (m Model) handleLeaderKeyPrompts(key string) (tea.Model, tea.Cmd) {
 				m.addToast(fmt.Sprintf("Sent via %s", prompt.MethodName(m.promptInjectMethod)), ToastSuccess)
 			}
 		}
-	case "s": // Start as objective (like Ralph - auto-completes)
-		if len(m.promptList) > 0 {
-			p := m.promptList[m.promptSelected]
-			expanded := m.expandPromptVariables(p.Content)
-			return m.startChatWithObjective(expanded, chat.ContextPrompt)
-		}
 	}
 	return m, nil
 }
@@ -1509,170 +1257,8 @@ func (m Model) handleLeaderKeyPlan(key string) (tea.Model, tea.Cmd) {
 		m.loadPlanFile()
 		m.diffViewport.SetContent(m.renderRightPane())
 		m.addToast("Refreshed", ToastInfo)
-	case "s": // Start/execute plan as objective (like Ralph)
-		if m.planPath != "" && m.planContent != "" {
-			// Use plan content as objective
-			objective := fmt.Sprintf("Execute this plan:\n\n%s", m.planContent)
-			return m.startChatWithObjective(objective, chat.ContextPlan)
-		} else {
-			m.addToast("No plan loaded", ToastWarning)
-		}
 	}
 	return m, nil
-}
-
-// renderChatPane renders the chat interface
-func (m *Model) renderChatPane() string {
-	var sb strings.Builder
-	width := m.diffViewport.Width
-
-	sb.WriteString(m.theme.Title.Render("Claude Chat") + "\n")
-	sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", width-4)) + "\n\n")
-
-	if m.chat == nil {
-		sb.WriteString(m.theme.Dim.Render("Chat not active"))
-		return sb.String()
-	}
-
-	// Show chat output
-	output := m.chat.Output()
-	if output == "" {
-		sb.WriteString(m.theme.Dim.Render("Waiting for response...\n\n"))
-	} else {
-		// Render output with basic formatting
-		lines := strings.Split(output, "\n")
-		maxLines := m.diffViewport.Height - 10
-		if len(lines) > maxLines {
-			lines = lines[len(lines)-maxLines:]
-		}
-		for _, line := range lines {
-			sb.WriteString(line + "\n")
-		}
-		sb.WriteString("\n")
-	}
-
-	// Show input area
-	sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", width-4)) + "\n")
-	sb.WriteString(m.chatInput.View() + "\n\n")
-	sb.WriteString(m.theme.Dim.Render("Enter:send  Esc:close  ^L:clear"))
-
-	return sb.String()
-}
-
-// overlayChatPanel renders a chat panel overlay taking 80% of the screen
-func (m Model) overlayChatPanel(mainView string) string {
-	// Calculate overlay dimensions (80% of screen)
-	overlayWidth := int(float64(m.width) * 0.8)
-	overlayHeight := int(float64(m.height) * 0.8)
-
-	// Ensure minimum sizes
-	if overlayWidth < 40 {
-		overlayWidth = 40
-	}
-	if overlayHeight < 10 {
-		overlayHeight = 10
-	}
-
-	// Build chat content
-	var chatContent strings.Builder
-
-	// Header with mode indicator
-	if m.chat != nil && m.chat.IsObjectiveMode() {
-		chatContent.WriteString(m.theme.Title.Render("⚡ Running Objective") + "\n")
-		chatContent.WriteString(m.theme.Dim.Render(strings.Repeat("─", overlayWidth-6)) + "\n")
-		// Show truncated objective
-		obj := m.chat.Objective()
-		if len(obj) > overlayWidth-10 {
-			obj = obj[:overlayWidth-13] + "..."
-		}
-		chatContent.WriteString(m.theme.Dim.Render("» "+obj) + "\n\n")
-	} else {
-		chatContent.WriteString(m.theme.Title.Render("Claude Chat") + "\n")
-		chatContent.WriteString(m.theme.Dim.Render(strings.Repeat("─", overlayWidth-6)) + "\n\n")
-	}
-
-	// Chat output
-	if m.chat != nil {
-		output := m.chat.Output()
-		if output == "" {
-			chatContent.WriteString(m.theme.Dim.Render("Waiting for response...") + "\n")
-		} else {
-			// Show last N lines that fit
-			lines := strings.Split(output, "\n")
-			maxLines := overlayHeight - 8 // Reserve space for header, input, hints
-			if maxLines < 5 {
-				maxLines = 5
-			}
-			if len(lines) > maxLines {
-				lines = lines[len(lines)-maxLines:]
-			}
-			for _, line := range lines {
-				// Truncate long lines
-				if lipgloss.Width(line) > overlayWidth-6 {
-					line = lipgloss.NewStyle().MaxWidth(overlayWidth - 6).Render(line)
-				}
-				chatContent.WriteString(line + "\n")
-			}
-		}
-	}
-
-	// Input area (only in interactive mode)
-	if m.chat == nil || !m.chat.IsObjectiveMode() {
-		chatContent.WriteString("\n" + m.theme.Dim.Render(strings.Repeat("─", overlayWidth-6)) + "\n")
-		chatContent.WriteString(m.chatInput.View() + "\n")
-		chatContent.WriteString(m.theme.Dim.Render("Enter:send  Esc:close  ^L:clear"))
-	} else {
-		chatContent.WriteString("\n" + m.theme.Dim.Render(strings.Repeat("─", overlayWidth-6)) + "\n")
-		chatContent.WriteString(m.theme.Dim.Render("Running... (Esc to cancel)"))
-	}
-
-	// Style the overlay box
-	overlayBox := lipgloss.NewStyle().
-		Width(overlayWidth-2).
-		Height(overlayHeight-2).
-		Background(lipgloss.Color("#0d0d1a")).
-		Foreground(lipgloss.Color("#e0e0e0")).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#5a5a8a")).
-		Padding(1, 2).
-		Render(chatContent.String())
-
-	// Calculate position to center the overlay
-	startX := (m.width - overlayWidth) / 2
-	startY := (m.height - overlayHeight) / 2
-	if startX < 0 {
-		startX = 0
-	}
-	if startY < 0 {
-		startY = 0
-	}
-
-	// Split main view into lines and overlay the chat panel
-	lines := strings.Split(mainView, "\n")
-	overlayLines := strings.Split(overlayBox, "\n")
-
-	for i, overlayLine := range overlayLines {
-		lineIdx := startY + i
-		if lineIdx >= 0 && lineIdx < len(lines) {
-			mainLine := lines[lineIdx]
-
-			// Build the new line: left padding + overlay + rest of line (dimmed)
-			if startX > 0 {
-				// Keep left portion
-				leftPart := ""
-				if lipgloss.Width(mainLine) > startX {
-					leftPart = lipgloss.NewStyle().MaxWidth(startX).Render(mainLine)
-				} else {
-					leftPart = mainLine + strings.Repeat(" ", startX-lipgloss.Width(mainLine))
-				}
-				lines[lineIdx] = leftPart + overlayLine
-			} else {
-				lines[lineIdx] = overlayLine
-			}
-		}
-	}
-
-	return strings.Join(lines, "\n")
 }
 
 // cycleMode cycles through the available modes
@@ -1977,11 +1563,6 @@ func (m Model) View() string {
 
 	// Build main view
 	mainView := lipgloss.JoinVertical(lipgloss.Left, header, content, status)
-
-	// Overlay chat panel (80% of screen) when chat is active
-	if m.chatActive {
-		mainView = m.overlayChatPanel(mainView)
-	}
 
 	// Overlay which-key popup at bottom-center when leader is active
 	if m.leaderActive {
@@ -2334,10 +1915,6 @@ func (m *Model) renderDiff() string {
 
 // renderRightPane returns the content for the right pane based on current mode
 func (m *Model) renderRightPane() string {
-	// Show chat pane if chat is active
-	if m.chatActive {
-		return m.renderChatPane()
-	}
 
 	switch m.leftPaneMode {
 	case LeftPaneModePrompts:
@@ -2736,12 +2313,6 @@ func (m Model) renderMinimap() string {
 func (m Model) renderStatus() string {
 	k := m.config.Keys
 
-	// Chat mode has its own hints
-	if m.chatActive {
-		return m.theme.Status.Render(fmt.Sprintf("%s:send  %s:close  %s:clear",
-			k.SendChat, k.CloseChat, k.ClearChat))
-	}
-
 	// Plan input mode
 	if m.planInputActive {
 		return m.theme.Status.Render("Enter:submit  Esc:cancel")
@@ -2789,7 +2360,6 @@ func (m Model) renderHelp() string {
 	}
 	help.WriteString(fmt.Sprintf("    %-14s Toggle left pane\n", k.ToggleLeftPane))
 	help.WriteString(fmt.Sprintf("    %-14s Toggle minimap\n", k.ToggleMinimap))
-	help.WriteString(fmt.Sprintf("    %-14s Toggle chat\n", k.ToggleChat))
 	help.WriteString(fmt.Sprintf("    %-14s This help\n", k.Help))
 	help.WriteString(fmt.Sprintf("    %-14s Quit\n\n", k.Quit))
 
@@ -2823,8 +2393,7 @@ func (m Model) renderHelp() string {
 			help.WriteString(fmt.Sprintf("    %-14s Delete prompt\n", k.DeletePrompt))
 			help.WriteString(fmt.Sprintf("    %-14s Yank (copy to clipboard)\n", k.YankPrompt))
 			help.WriteString(fmt.Sprintf("    %-14s Cycle inject method\n", k.InjectMethod))
-			help.WriteString(fmt.Sprintf("    %-14s Inject prompt\n", k.SendPrompt))
-			help.WriteString(fmt.Sprintf("    %-14s Open Prompt chat\n\n", k.ChatPrompt))
+			help.WriteString(fmt.Sprintf("    %-14s Inject prompt\n\n", k.SendPrompt))
 		}
 
 	case LeftPaneModeRalph:
@@ -2833,7 +2402,6 @@ func (m Model) renderHelp() string {
 			help.WriteString(fmt.Sprintf("    %-14s Cancel Ralph loop\n", k.CancelRalph))
 		}
 		help.WriteString(fmt.Sprintf("    %-14s Refresh status\n", k.Refresh))
-		help.WriteString(fmt.Sprintf("    %-14s Open Ralph chat\n", k.ChatRalph))
 		help.WriteString(fmt.Sprintf("    %-14s Scroll prompt\n\n", k.Down+"/"+k.Up))
 
 	case LeftPaneModePlan:
@@ -2845,15 +2413,6 @@ func (m Model) renderHelp() string {
 		help.WriteString(fmt.Sprintf("    %-14s Refresh plan\n", k.Refresh))
 		help.WriteString(fmt.Sprintf("    %-14s Open Plan chat\n", k.ChatPlan))
 		help.WriteString(fmt.Sprintf("    %-14s Scroll plan content\n\n", k.Down+"/"+k.Up+"/"+k.PageDown+"/"+k.PageUp))
-	}
-
-	// Chat section (only if chat is active)
-	if m.chatActive {
-		help.WriteString("  === Chat ===\n")
-		help.WriteString(fmt.Sprintf("    %-14s Send message\n", k.SendChat))
-		help.WriteString(fmt.Sprintf("    %-14s Close chat\n", k.CloseChat))
-		help.WriteString(fmt.Sprintf("    %-14s Kill chat and close\n", k.KillChat))
-		help.WriteString(fmt.Sprintf("    %-14s Clear output\n\n", k.ClearChat))
 	}
 
 	// Template variables (only in prompts mode)
