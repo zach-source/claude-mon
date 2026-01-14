@@ -533,6 +533,110 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Handle context edit mode - must check BEFORE global keys
+		if m.contextEditMode {
+			switch key {
+			case "enter":
+				// Save the edited value
+				value := m.contextEditInput.Value()
+				if value != "" {
+					m.contextEditMode = false
+					m.contextEditInput.Reset()
+
+					// Apply the change based on which field is being edited
+					if m.contextCurrent != nil {
+						switch m.contextEditField {
+						case "k8s":
+							// Parse: context [namespace] [--kubeconfig path]
+							parts := strings.Fields(value)
+							if len(parts) > 0 {
+								k8sCtx := parts[0]
+								namespace := ""
+								kubeconfig := ""
+								for i := 1; i < len(parts); i++ {
+									if parts[i] == "--kubeconfig" && i+1 < len(parts) {
+										kubeconfig = parts[i+1]
+										i++
+									} else if namespace == "" {
+										namespace = parts[i]
+									}
+								}
+								m.contextCurrent.SetKubernetes(k8sCtx, namespace, kubeconfig)
+							}
+						case "aws":
+							// Parse: profile [region]
+							parts := strings.Fields(value)
+							if len(parts) > 0 {
+								profile := parts[0]
+								region := ""
+								if len(parts) > 1 {
+									region = parts[1]
+								}
+								m.contextCurrent.SetAWS(profile, region)
+							}
+						case "git":
+							// Parse: [branch] [repo]
+							parts := strings.Fields(value)
+							branch := ""
+							repo := ""
+							if len(parts) > 0 {
+								branch = parts[0]
+							}
+							if len(parts) > 1 {
+								repo = parts[1]
+							}
+							m.contextCurrent.SetGit(branch, repo)
+						case "env":
+							// Parse: KEY=VALUE [KEY2=VALUE2...]
+							envVars := make(map[string]string)
+							parts := strings.Fields(value)
+							for _, part := range parts {
+								if strings.Contains(part, "=") {
+									kv := strings.SplitN(part, "=", 2)
+									if len(kv) == 2 {
+										envVars[kv[0]] = kv[1]
+									}
+								}
+							}
+							m.contextCurrent.SetEnv(envVars)
+						case "custom":
+							// Parse: KEY=VALUE [KEY2=VALUE2...]
+							customVars := make(map[string]string)
+							parts := strings.Fields(value)
+							for _, part := range parts {
+								if strings.Contains(part, "=") {
+									kv := strings.SplitN(part, "=", 2)
+									if len(kv) == 2 {
+										customVars[kv[0]] = kv[1]
+									}
+								}
+							}
+							m.contextCurrent.SetCustom(customVars)
+						}
+
+						// Save the context
+						if err := m.contextCurrent.Save(); err != nil {
+							m.addToast(fmt.Sprintf("Failed to save context: %v", err), ToastError)
+						} else {
+							m.addToast("Context updated", ToastSuccess)
+						}
+					}
+				}
+				return m, nil
+			case "esc":
+				// Cancel editing
+				m.contextEditMode = false
+				m.contextEditField = ""
+				m.contextEditInput.Reset()
+				return m, nil
+			default:
+				// Forward to textinput
+				var cmd tea.Cmd
+				m.contextEditInput, cmd = m.contextEditInput.Update(msg)
+				return m, cmd
+			}
+		}
+
 		// Global keys (work in any mode when chat is NOT active)
 		switch key {
 		case m.config.Keys.Help:
@@ -602,6 +706,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleRalphKeys(msg)
 		case LeftPaneModePlan:
 			return m.handlePlanKeys(msg)
+		case LeftPaneModeContext:
+			return m.handleContextKeys(msg)
 		default:
 			return m.handleHistoryKeys(msg)
 		}
@@ -1159,6 +1265,131 @@ func (m Model) generatePlan(description string) tea.Cmd {
 		slug := strings.TrimSuffix(filepath.Base(path), ".md")
 		return planGeneratedMsg{path: path, slug: slug}
 	}
+}
+
+// handleContextKeys handles key events in Context mode
+func (m Model) handleContextKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
+	switch key {
+	case "k":
+		// Set Kubernetes context
+		m.contextEditMode = true
+		m.contextEditField = "k8s"
+		m.contextEditInput.Placeholder = "context [namespace] [--kubeconfig path]"
+		m.contextEditInput.Reset()
+		m.contextEditInput.Focus()
+		return m, textinput.Blink
+	case "a":
+		// Set AWS profile
+		m.contextEditMode = true
+		m.contextEditField = "aws"
+		m.contextEditInput.Placeholder = "profile [region]"
+		m.contextEditInput.Reset()
+		m.contextEditInput.Focus()
+		return m, textinput.Blink
+	case "g":
+		// Set Git context
+		m.contextEditMode = true
+		m.contextEditField = "git"
+		m.contextEditInput.Placeholder = "[branch] [repo] (auto-detects if empty)"
+		m.contextEditInput.Reset()
+		m.contextEditInput.Focus()
+		return m, textinput.Blink
+	case "e":
+		// Set environment variables
+		m.contextEditMode = true
+		m.contextEditField = "env"
+		m.contextEditInput.Placeholder = "KEY=VALUE [KEY2=VALUE2...]"
+		m.contextEditInput.Reset()
+		m.contextEditInput.Focus()
+		return m, textinput.Blink
+	case "c":
+		// Set custom values
+		m.contextEditMode = true
+		m.contextEditField = "custom"
+		m.contextEditInput.Placeholder = "KEY=VALUE [KEY2=VALUE2...]"
+		m.contextEditInput.Reset()
+		m.contextEditInput.Focus()
+		return m, textinput.Blink
+	case "C":
+		// Clear context section
+		// For simplicity, clear all for now
+		if m.contextCurrent != nil {
+			m.contextCurrent.Clear("all")
+			if err := m.contextCurrent.Save(); err != nil {
+				m.addToast(fmt.Sprintf("Failed to clear context: %v", err), ToastError)
+			} else {
+				m.addToast("Context cleared", ToastSuccess)
+			}
+		}
+		return m, nil
+	case "r":
+		// Reload context from disk
+		if ctx, err := workingctx.Load(); err == nil {
+			m.contextCurrent = ctx
+			m.addToast("Context reloaded", ToastSuccess)
+		} else {
+			m.addToast(fmt.Sprintf("Failed to reload context: %v", err), ToastError)
+		}
+		return m, nil
+	case "l":
+		// List all project contexts in right pane
+		contexts, err := workingctx.ListAll()
+		if err != nil {
+			m.addToast(fmt.Sprintf("Failed to list contexts: %v", err), ToastError)
+			return m, nil
+		}
+
+		// Format the list
+		var sb strings.Builder
+		sb.WriteString("## All Project Contexts\n\n")
+
+		if len(contexts) == 0 {
+			sb.WriteString("No contexts found.")
+		} else {
+			for _, ctx := range contexts {
+				sb.WriteString(fmt.Sprintf("### %s\n", ctx.ProjectRoot))
+				summary := []string{}
+				if ctx.Context["kubernetes"] != nil {
+					summary = append(summary, "k8s")
+				}
+				if ctx.Context["aws"] != nil {
+					summary = append(summary, "aws")
+				}
+				if ctx.Context["custom"] != nil {
+					if custom, ok := ctx.Context["custom"].(map[string]interface{}); ok {
+						summary = append(summary, fmt.Sprintf("%d custom", len(custom)))
+					}
+				}
+
+				if len(summary) > 0 {
+					sb.WriteString(fmt.Sprintf("[%s] ", strings.Join(summary, ", ")))
+				}
+				sb.WriteString(fmt.Sprintf("Updated: %s\n\n", ctx.GetAge()))
+			}
+		}
+
+		m.diffViewport.SetContent(sb.String())
+		m.diffViewport.GotoTop()
+		return m, nil
+	}
+
+	// Handle scrolling in right pane
+	if m.activePane == PaneRight {
+		switch key {
+		case m.config.Keys.Down, "down":
+			m.diffViewport.LineDown(1)
+		case m.config.Keys.Up, "up":
+			m.diffViewport.LineUp(1)
+		case m.config.Keys.PageDown:
+			m.diffViewport.HalfViewDown()
+		case m.config.Keys.PageUp:
+			m.diffViewport.HalfViewUp()
+		}
+	}
+
+	return m, nil
 }
 
 // handleLeaderKey handles context-sensitive key actions when leader mode is active
