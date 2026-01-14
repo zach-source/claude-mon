@@ -54,6 +54,16 @@ type promptRefineInputMsg struct {
 	request string
 }
 
+// promptRefineOutputMsg is sent when Claude CLI outputs a line during refinement
+type promptRefineOutputMsg struct {
+	line string
+}
+
+// promptRefineCompleteMsg is sent when Claude CLI finishes refinement
+type promptRefineCompleteMsg struct {
+	output string
+}
+
 // planGeneratingMsg is sent when plan generation starts
 type planGeneratingMsg struct{}
 
@@ -182,6 +192,9 @@ type Model struct {
 	promptRefining       bool                   // Whether we're in refine mode
 	promptRefineInput    textinput.Model        // Refinement request input
 	promptRefiningPrompt *prompt.Prompt         // Prompt being refined
+	promptRefiningCmd    *exec.Cmd              // Running Claude CLI command
+	promptRefiningOutput string                 // Accumulated output from refinement
+	promptRefiningDone   bool                   // Whether refinement is complete
 	promptInjectMethod   prompt.InjectionMethod // Current injection method
 
 	// Version view mode
@@ -580,7 +593,63 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case promptRefineErrorMsg:
 		logger.Log("Prompt refine error: %v", msg.err)
 		m.promptRefining = false
+		m.promptRefiningDone = false
+		m.promptRefiningCmd = nil
 		m.addToast("Refine failed: "+msg.err.Error(), ToastError)
+
+	case promptRefineCompleteMsg:
+		// Claude CLI finished refinement - create version backup and save refined prompt
+		logger.Log("Prompt refinement complete, received %d bytes", len(msg.output))
+		m.promptRefiningDone = true
+		m.promptRefiningCmd = nil
+
+		p := m.promptRefiningPrompt
+		if p == nil {
+			m.promptRefining = false
+			m.addToast("No prompt to refine", ToastError)
+			return m, nil
+		}
+
+		// First, create a version backup of the current prompt
+		if err := m.promptStore.CreateVersion(p); err != nil {
+			logger.Log("Failed to create version backup: %v", err)
+			m.addToast("Failed to backup: "+err.Error(), ToastWarning)
+			// Continue anyway - the backup is nice to have but not critical
+		} else {
+			logger.Log("Created version backup: %s -> v%d", p.Name, p.Version)
+		}
+
+		// Now update the prompt with refined content and new version number
+		now := time.Now()
+		refinedPrompt := prompt.Prompt{
+			Name:        p.Name,
+			Description: p.Description,
+			Version:     p.Version, // Already incremented by CreateVersion
+			Created:     p.Created, // Keep original creation date
+			Updated:     now,       // Update timestamp to now
+			Tags:        p.Tags,
+			Content:     msg.output,
+			Path:        p.Path, // Save to same path
+			IsGlobal:    p.IsGlobal,
+		}
+
+		// Save the refined prompt
+		if err := m.promptStore.Save(&refinedPrompt); err != nil {
+			m.promptRefining = false
+			m.addToast("Failed to save refined prompt: "+err.Error(), ToastError)
+			logger.Log("Failed to save refined prompt: %v", err)
+			return m, nil
+		}
+
+		logger.Log("Saved refined prompt version %d: %s", refinedPrompt.Version, p.Path)
+
+		// Open nvim for further editing
+		m.addToast(fmt.Sprintf("Saved v%d, editing...", refinedPrompt.Version), ToastSuccess)
+		cmd := exec.Command("nvim", p.Path)
+		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+			// Refresh prompt list after editing
+			return promptEditedMsg{path: p.Path}
+		})
 
 	case promptRefineInputMsg:
 		// User submitted refinement request - execute refinement
@@ -1762,18 +1831,34 @@ func (m Model) renderPromptsList() string {
 		sb.WriteString(m.theme.Title.Render("Refine Prompt") + "\n")
 		sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", listWidth-4)) + "\n\n")
 
-		sb.WriteString(m.theme.Normal.Render("What do you want to improve?\n\n"))
-		sb.WriteString(m.promptRefineInput.View() + "\n\n")
-		sb.WriteString(m.theme.Dim.Render("Enter:submit  Esc:cancel\n\n"))
+		if !m.promptRefiningDone {
+			// Still collecting input or running refinement
+			if m.promptRefiningCmd == nil {
+				// Input phase
+				sb.WriteString(m.theme.Normal.Render("What do you want to improve?\n\n"))
+				sb.WriteString(m.promptRefineInput.View() + "\n\n")
+				sb.WriteString(m.theme.Dim.Render("Enter:submit  Esc:cancel\n\n"))
 
-		// Show available template variables
-		sb.WriteString(m.theme.Title.Render("Available Variables:") + "\n")
-		sb.WriteString(m.theme.Dim.Render("{{plan}}       Plan content\n"))
-		sb.WriteString(m.theme.Dim.Render("{{plan_name}}  Plan file name\n"))
-		sb.WriteString(m.theme.Dim.Render("{{file}}       Current file path\n"))
-		sb.WriteString(m.theme.Dim.Render("{{file_name}}  Current file name\n"))
-		sb.WriteString(m.theme.Dim.Render("{{project}}    Project name\n"))
-		sb.WriteString(m.theme.Dim.Render("{{cwd}}        Working directory\n"))
+				// Show available template variables
+				sb.WriteString(m.theme.Title.Render("Available Variables:") + "\n")
+				sb.WriteString(m.theme.Dim.Render("{{plan}}       Plan content\n"))
+				sb.WriteString(m.theme.Dim.Render("{{plan_name}}  Plan file name\n"))
+				sb.WriteString(m.theme.Dim.Render("{{file}}       Current file path\n"))
+				sb.WriteString(m.theme.Dim.Render("{{file_name}}  Current file name\n"))
+				sb.WriteString(m.theme.Dim.Render("{{project}}    Project name\n"))
+				sb.WriteString(m.theme.Dim.Render("{{cwd}}        Working directory\n"))
+			} else {
+				// Running refinement - show progress
+				sb.WriteString(m.theme.Normal.Render("Refining prompt with Claude...\n\n"))
+				sb.WriteString(m.theme.Dim.Render("◐ Working..."))
+				sb.WriteString("\n\n" + m.theme.Dim.Render("Esc:cancel"))
+			}
+		} else {
+			// Refinement complete, waiting for nvim
+			sb.WriteString(m.theme.Title.Render("✓ Refinement complete!\n\n"))
+			sb.WriteString(m.theme.Dim.Render("Reviewing changes in nvim...\n\n"))
+			sb.WriteString(m.theme.Dim.Render("Please wait for diff view to close"))
+		}
 
 		return sb.String()
 	}
@@ -3016,7 +3101,7 @@ func (m *Model) refinePrompt(p prompt.Prompt) (Model, tea.Cmd) {
 	return *m, textinput.Blink
 }
 
-// executePromptRefinement runs Claude CLI to refine the prompt based on user request
+// executePromptRefinement runs Claude CLI to refine the prompt
 func (m *Model) executePromptRefinement(request string) tea.Cmd {
 	return func() tea.Msg {
 		p := m.promptRefiningPrompt
@@ -3030,6 +3115,10 @@ func (m *Model) executePromptRefinement(request string) tea.Cmd {
 		// Run Claude CLI with -p flag for print mode (non-interactive)
 		cmd := exec.Command("claude", "-p", metaPrompt)
 		cmd.Env = append(os.Environ(), "CLAUDE_CODE_ENTRYPOINT=cli")
+
+		// Mark that refinement is running
+		m.promptRefiningCmd = cmd
+
 		output, err := cmd.Output()
 		if err != nil {
 			// Try to get stderr for better error message
@@ -3045,27 +3134,7 @@ func (m *Model) executePromptRefinement(request string) tea.Cmd {
 		refined = strings.TrimSuffix(refined, "```")
 		refined = strings.TrimSpace(refined)
 
-		// Create a new prompt with the refined content but same metadata
-		refinedPrompt := prompt.Prompt{
-			Name:        p.Name,
-			Description: p.Description,
-			Version:     p.Version,
-			Created:     p.Created,
-			Updated:     p.Updated,
-			Tags:        p.Tags,
-			Content:     refined,
-		}
-
-		// Write refined version to temp file with frontmatter
-		refinedPath := filepath.Join(os.TempDir(), "refined-"+filepath.Base(p.Path))
-		if err := os.WriteFile(refinedPath, []byte(refinedPrompt.Format()), 0644); err != nil {
-			return promptRefineErrorMsg{err: fmt.Errorf("failed to write refined prompt: %w", err)}
-		}
-
-		return promptRefinedMsg{
-			originalPath: p.Path,
-			refinedPath:  refinedPath,
-		}
+		return promptRefineCompleteMsg{output: refined}
 	}
 }
 
