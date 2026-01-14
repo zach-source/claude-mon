@@ -450,6 +450,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 
+		// Handle refine input mode - must check BEFORE global keys
+		if m.promptRefining {
+			switch key {
+			case "enter":
+				// Submit refinement request
+				request := m.promptRefineInput.Value()
+				if request != "" {
+					m.promptRefining = false
+					m.promptRefineInput.Reset()
+					return m, func() tea.Msg {
+						return promptRefineInputMsg{request: request}
+					}
+				}
+			case "esc":
+				// Cancel refine input
+				m.promptRefining = false
+				m.promptRefiningPrompt = nil
+				m.promptRefineInput.Reset()
+				return m, nil
+			default:
+				// Forward to textinput
+				var cmd tea.Cmd
+				m.promptRefineInput, cmd = m.promptRefineInput.Update(msg)
+				return m, cmd
+			}
+		}
+
+		// Handle plan input mode - must check BEFORE global keys
+		if m.planInputActive {
+			switch key {
+			case "enter":
+				// Submit plan description
+				description := m.planInput.Value()
+				if description != "" {
+					m.planInputActive = false
+					m.planGenerating = true
+					m.planInput.Reset()
+					m.addToast("Generating plan...", ToastInfo)
+					return m, m.generatePlan(description)
+				}
+			case "esc":
+				// Cancel plan input
+				m.planInputActive = false
+				m.planInput.Reset()
+				return m, nil
+			default:
+				// Forward to textinput
+				var cmd tea.Cmd
+				m.planInput, cmd = m.planInput.Update(msg)
+				return m, cmd
+			}
+		}
+
 		// Global keys (work in any mode when chat is NOT active)
 		switch key {
 		case m.config.Keys.Help:
@@ -852,33 +905,6 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
-	}
-
-	// Handle refine input mode
-	if m.promptRefining {
-		switch key {
-		case "enter":
-			// Submit refinement request
-			request := m.promptRefineInput.Value()
-			if request != "" {
-				m.promptRefining = false
-				m.promptRefineInput.Reset()
-				return m, func() tea.Msg {
-					return promptRefineInputMsg{request: request}
-				}
-			}
-		case "esc":
-			// Cancel refine input
-			m.promptRefining = false
-			m.promptRefiningPrompt = nil
-			m.promptRefineInput.Reset()
-			return m, nil
-		default:
-			// Forward to textinput
-			var cmd tea.Cmd
-			m.promptRefineInput, cmd = m.promptRefineInput.Update(msg)
-			return m, cmd
-		}
 	}
 
 	// Normal prompt list mode
