@@ -21,10 +21,21 @@ A TUI application and daemon for watching Claude Code's file edits in real-time,
 - **Claude refinement**: Use Claude CLI to improve prompts with diff review
 - **Multiple injection methods**: Send prompts via tmux, OSC52, or clipboard
 
+### Working Context
+- **Project-specific context**: Each project has its own isolated working context
+- **Kubernetes integration**: Set context, namespace, and kubeconfig path
+- **AWS profiles**: Store profile and region for quick reference
+- **Git awareness**: Auto-detects branch and repository
+- **Environment variables**: Store project-specific env vars
+- **Custom values**: Add arbitrary key-value pairs
+- **Stale warnings**: Alerts when context is older than 24 hours
+- **Automatic injection**: Inject context into Claude prompts via hooks
+- **TUI management**: Full UI for viewing, editing, and managing context
+
 ### UI Features
 - **Two-pane layout**: List on left, content preview on right
 - **Toast notifications**: Floating feedback for all actions
-- **Mode switching**: Toggle between History, Prompts, Ralph, and Plan views
+- **Mode switching**: Toggle between History, Prompts, Ralph, Plan, and Context views
 - **Auto-refresh**: Ralph page auto-refreshes every 5 seconds to track loop progress
 
 ### Daemon & Data Management
@@ -175,6 +186,20 @@ claude-mon daemon start
 | Read prompt | Displays the current loop prompt |
 | See state path | Shows which state file is active |
 
+### Context Mode
+| Key | Action |
+|-----|--------|
+| `k` | Set Kubernetes context (context [namespace] [--kubeconfig path]) |
+| `a` | Set AWS profile (profile [region]) |
+| `g` | Set Git context ([branch] [repo], auto-detects if empty) |
+| `e` | Set environment variable (KEY=VALUE [KEY2=VALUE2...]) |
+| `c` | Set custom value (KEY=VALUE [KEY2=VALUE2...]) |
+| `C` | Clear all context or specific section |
+| `r` | Reload context from disk |
+| `l` | List all project contexts in right pane |
+| `Enter` | Save edited value |
+| `Esc` | Cancel editing |
+
 ### Version View Mode
 | Key | Action |
 |-----|--------|
@@ -317,6 +342,10 @@ This creates `~/.config/claude-mon/daemon.toml` with all default values and comm
 .claude/prompts/                      # Project-local prompts
   ├── project-context.prompt.md
   └── test-generator.prompt.md
+
+~/.claude/contexts/                   # Working context (per-project)
+  ├── claude-mon-a1b2c3d4e5f6.json   # Context for claude-mon project
+  └── myproject-123456789012.json    # Context for myproject
 ```
 
 ## Integration with Claude Code
@@ -331,6 +360,50 @@ SOCKET_PATH="/tmp/claude-mon-${WORKSPACE_ID}.sock"
 if [[ -S "$SOCKET_PATH" ]]; then
     echo "$TOOL_INPUT" | nc -U "$SOCKET_PATH" &
 fi
+```
+
+### Context Injection Hook
+
+To automatically inject working context into your Claude prompts, add a `UserPromptSubmit` hook:
+
+```bash
+#!/bin/bash
+# ~/.claude/hooks/inject-context.sh
+# Context injection hook for Claude Code
+
+# Ensure inject-context is installed
+if ! command -v inject-context &> /dev/null; then
+    echo "Warning: inject-context not found in PATH" >&2
+    # Continue without injection
+    echo '{"continue": true}'
+    exit 0
+fi
+
+# Pass stdin to inject-context and output result
+inject-context
+```
+
+Then in your Claude settings (`~/.config/claude/settings.json`):
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": "~/.claude/hooks/inject-context.sh"
+  }
+}
+```
+
+This will automatically inject your project's working context as a `<working-context>` block at the start of each conversation, unless context is already present in the prompt.
+
+**Context Block Format:**
+```
+<working-context>
+  Kubernetes: orbstack / default
+  AWS Profile: dev (us-west-2)
+  Git: main @ my-repo
+  Env: ENV=dev, DEBUG=true
+  Updated: 2h ago
+</working-context>
 ```
 
 ## Architecture
@@ -352,10 +425,19 @@ claude-mon-notify.sh
                                     ├── History View
                                     │   └── Diff with syntax highlighting
                                     │
-                                    └── Prompts View
-                                        ├── Prompt list (global + project)
-                                        ├── Version management
-                                        └── Claude CLI refinement
+                                    ├── Prompts View
+                                    │   ├── Prompt list (global + project)
+                                    │   └── Version management
+                                    │
+                                    ├── Ralph View
+                                    │   └── Loop status monitoring
+                                    │
+                                    ├── Plan View
+                                    │   └── Plan generation
+                                    │
+                                    └── Context View
+                                        ├── Project context display
+                                        └── Kubernetes/AWS/Git/Env management
 ```
 
 **Data Flow:**
@@ -401,8 +483,10 @@ claude-mon-notify.sh
 
 ## Recent Enhancements
 
+- ✅ **Working context management** with per-project context storage
+- ✅ **Context injection hook** for automatic prompt enhancement
+- ✅ **Five-tab layout**: History, Prompts, Ralph, Plan, and Context modes
 - ✅ **Ralph Loop integration** with auto-refresh every 5 seconds
-- ✅ **Four-tab layout**: History, Prompts, Ralph, and Plan modes
 - ✅ **Comprehensive configuration system** with TOML support
 - ✅ **Automated data retention** with configurable cleanup policies
 - ✅ **Backup system** with periodic snapshots and compression
