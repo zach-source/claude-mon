@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/ztaylor/claude-mon/internal/config"
+	workingctx "github.com/ztaylor/claude-mon/internal/context"
 	"github.com/ztaylor/claude-mon/internal/diff"
 	"github.com/ztaylor/claude-mon/internal/highlight"
 	"github.com/ztaylor/claude-mon/internal/history"
@@ -158,6 +159,7 @@ const (
 	LeftPaneModePrompts
 	LeftPaneModeRalph
 	LeftPaneModePlan
+	LeftPaneModeContext
 )
 
 // Model is the Bubbletea model
@@ -213,6 +215,15 @@ type Model struct {
 	planInputActive bool            // Whether plan input is active
 	planInput       textinput.Model // Plan description input
 	planGenerating  bool            // Whether plan is being generated
+
+	// Context management
+	contextCurrent   *workingctx.Context   // Current project context
+	contextList      []*workingctx.Context // All project contexts
+	contextSelected  int                   // Selected context in list view
+	contextEditMode  bool                  // Whether editing context values
+	contextEditField string                // Which field is being edited
+	contextEditInput textinput.Model       // Edit input field
+	contextViewport  viewport.Model        // For scrolling context list
 
 	// Layout
 	hideLeftPane bool // Toggle left pane visibility
@@ -352,6 +363,25 @@ func New(socketPath string, opts ...Option) Model {
 	refineTi.CharLimit = 500
 	refineTi.Width = 60
 	m.promptRefineInput = refineTi
+
+	// Initialize context
+	if ctx, err := workingctx.Load(); err == nil {
+		m.contextCurrent = ctx
+	} else {
+		logger.Log("Failed to load context: %v", err)
+		m.contextCurrent = workingctx.New()
+	}
+
+	// Initialize context edit input
+	ctxTi := textinput.New()
+	ctxTi.Placeholder = "Enter value..."
+	ctxTi.CharLimit = 200
+	ctxTi.Width = 40
+	m.contextEditInput = ctxTi
+
+	// Initialize context viewport
+	m.contextViewport = viewport.New(0, 0)
+	m.contextViewport.GotoTop()
 
 	return m
 }
@@ -541,6 +571,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "4":
 			// Direct access to Plan tab
 			m.switchToMode(LeftPaneModePlan)
+			return m, nil
+		case "5":
+			// Direct access to Context tab
+			m.switchToMode(LeftPaneModeContext)
 			return m, nil
 		case m.config.Keys.ToggleMinimap:
 			m.showMinimap = !m.showMinimap
@@ -1420,7 +1454,7 @@ func (m *Model) loadRalphState() {
 	}
 }
 
-// renderTabBar renders the tab bar with all 4 modes
+// renderTabBar renders the tab bar with all 5 modes
 func (m Model) renderTabBar() string {
 	tabs := []struct {
 		num  string
@@ -1432,6 +1466,7 @@ func (m Model) renderTabBar() string {
 		{"2", "Prompts", LeftPaneModePrompts, "📝"},
 		{"3", "Ralph", LeftPaneModeRalph, "🔄"},
 		{"4", "Plan", LeftPaneModePlan, "📋"},
+		{"5", "Context", LeftPaneModeContext, "⚙️"},
 	}
 
 	var parts []string
@@ -1564,6 +1599,81 @@ func (m Model) renderPlanList() string {
 	return sb.String()
 }
 
+// renderContextList renders the context management view for the left pane
+func (m Model) renderContextList() string {
+	var sb strings.Builder
+	listWidth := m.width / 3
+
+	// Reload context to ensure we have latest data
+	if m.contextCurrent == nil {
+		if ctx, err := workingctx.Load(); err == nil {
+			m.contextCurrent = ctx
+		}
+	}
+
+	// Title
+	sb.WriteString(m.theme.Title.Render("⚙️ Working Context\n\n"))
+
+	if m.contextCurrent == nil {
+		sb.WriteString(m.theme.Dim.Render("No context available"))
+		return sb.String()
+	}
+
+	// Project info
+	sb.WriteString(m.theme.Selected.Render("📁 Project:") + "\n")
+	projectPath := m.contextCurrent.ProjectRoot
+	if len(projectPath) > listWidth-6 {
+		projectPath = "..." + projectPath[len(projectPath)-listWidth+9:]
+	}
+	sb.WriteString(m.theme.Normal.Render(projectPath) + "\n\n")
+
+	// Show current context
+	ctx := m.contextCurrent.Format()
+	lines := strings.Split(ctx, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "Project:") {
+			// Skip project line as we already showed it
+			continue
+		}
+		if line == "" {
+			sb.WriteString("\n")
+			continue
+		}
+		// Format key-value pairs
+		if strings.Contains(line, ":") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				sb.WriteString(m.theme.Dim.Render(key+": ") + m.theme.Normal.Render(value) + "\n")
+			}
+		} else {
+			sb.WriteString(line + "\n")
+		}
+	}
+
+	// Stale warning
+	if m.contextCurrent.IsStale() {
+		sb.WriteString("\n")
+		sb.WriteString(m.theme.Status.Render("⚠️ Context is stale (>24h)"))
+		sb.WriteString("\n")
+	}
+
+	// Help text
+	sb.WriteString("\n")
+	sb.WriteString(m.theme.Dim.Render("Actions:\n"))
+	sb.WriteString(m.theme.Normal.Render("  k: Set Kubernetes\n"))
+	sb.WriteString(m.theme.Normal.Render("  a: Set AWS\n"))
+	sb.WriteString(m.theme.Normal.Render("  g: Set Git\n"))
+	sb.WriteString(m.theme.Normal.Render("  e: Set Env var\n"))
+	sb.WriteString(m.theme.Normal.Render("  c: Set Custom\n"))
+	sb.WriteString(m.theme.Normal.Render("  C: Clear section\n"))
+	sb.WriteString(m.theme.Normal.Render("  r: Refresh\n"))
+	sb.WriteString(m.theme.Normal.Render("  l: List all contexts"))
+
+	return sb.String()
+}
+
 // View implements tea.Model
 func (m Model) View() string {
 	if !m.ready {
@@ -1633,6 +1743,8 @@ func (m Model) View() string {
 			leftContent = m.renderRalphStatus()
 		case LeftPaneModePlan:
 			leftContent = m.renderPlanList()
+		case LeftPaneModeContext:
+			leftContent = m.renderContextList()
 		default:
 			leftContent = m.renderHistory()
 		}
