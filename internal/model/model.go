@@ -2003,35 +2003,78 @@ func (m Model) renderContextList() string {
 				sb.WriteString(m.theme.Selected.Render("📁 " + ctx.ProjectRoot))
 				sb.WriteString("\n")
 
-				// Summary of what's set
-				var tags []string
-				if ctx.Context["kubernetes"] != nil {
-					tags = append(tags, "k8s")
-				}
-				if ctx.Context["aws"] != nil {
-					tags = append(tags, "aws")
-				}
-				if ctx.Context["git"] != nil {
-					tags = append(tags, "git")
-				}
-				if ctx.Context["env"] != nil {
-					if env, ok := ctx.Context["env"].(map[string]interface{}); ok && len(env) > 0 {
-						tags = append(tags, fmt.Sprintf("env(%d)", len(env)))
+				// Show Kubernetes context
+				if k8s := ctx.GetKubernetes(); k8s != nil {
+					k8sInfo := k8s.Context
+					if k8s.Namespace != "" {
+						k8sInfo += " / " + k8s.Namespace
 					}
+					if k8s.Kubeconfig != "" {
+						k8sInfo += " (" + k8s.Kubeconfig + ")"
+					}
+					sb.WriteString(m.theme.Dim.Render("  ⚙️ Kubernetes: ") + m.theme.Normal.Render(k8sInfo))
+					sb.WriteString("\n")
 				}
-				if ctx.Context["custom"] != nil {
-					if custom, ok := ctx.Context["custom"].(map[string]interface{}); ok && len(custom) > 0 {
-						tags = append(tags, fmt.Sprintf("custom(%d)", len(custom)))
+
+				// Show AWS profile
+				if aws := ctx.GetAWS(); aws != nil {
+					awsInfo := aws.Profile
+					if aws.Region != "" {
+						awsInfo += " (" + aws.Region + ")"
+					}
+					sb.WriteString(m.theme.Dim.Render("  ⛅️ AWS: ") + m.theme.Normal.Render(awsInfo))
+					sb.WriteString("\n")
+				}
+
+				// Show Git info
+				if git := ctx.GetGit(); git != nil {
+					gitInfo := ""
+					if git.Branch != "" {
+						gitInfo = git.Branch
+						if git.Repo != "" {
+							gitInfo += " @ " + git.Repo
+						}
+					} else if git.Repo != "" {
+						gitInfo = git.Repo
+					}
+					if gitInfo != "" {
+						sb.WriteString(m.theme.Dim.Render("  ️🌿 Git: ") + m.theme.Normal.Render(gitInfo))
+						sb.WriteString("\n")
 					}
 				}
 
-				if len(tags) > 0 {
-					sb.WriteString(m.theme.Dim.Render("  [" + strings.Join(tags, ", ") + "]"))
+				// Show environment variables
+				if env := ctx.GetEnv(); env != nil && len(env) > 0 {
+					var envPairs []string
+					for k, v := range env {
+						envPairs = append(envPairs, k+"="+v)
+					}
+					// Show first 3, then "..." if more
+					if len(envPairs) > 3 {
+						envPairs = envPairs[:3]
+						envPairs = append(envPairs, "...")
+					}
+					sb.WriteString(m.theme.Dim.Render("  🔧 Env: ") + m.theme.Normal.Render(strings.Join(envPairs, " ")))
+					sb.WriteString("\n")
 				}
-				sb.WriteString("\n")
+
+				// Show custom values
+				if custom := ctx.GetCustom(); custom != nil && len(custom) > 0 {
+					var customPairs []string
+					for k, v := range custom {
+						customPairs = append(customPairs, k+"="+v)
+					}
+					// Show first 3, then "..." if more
+					if len(customPairs) > 3 {
+						customPairs = customPairs[:3]
+						customPairs = append(customPairs, "...")
+					}
+					sb.WriteString(m.theme.Dim.Render("  📝 Custom: ") + m.theme.Normal.Render(strings.Join(customPairs, " ")))
+					sb.WriteString("\n")
+				}
 
 				// Updated time
-				sb.WriteString(m.theme.Dim.Render("  Updated: " + ctx.GetAge()))
+				sb.WriteString(m.theme.Dim.Render("  🕒 Updated: " + ctx.GetAge()))
 				sb.WriteString("\n\n")
 			}
 		}
