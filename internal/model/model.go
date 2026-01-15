@@ -1437,6 +1437,9 @@ func (m Model) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "4":
 		m.switchToMode(LeftPaneModePlan)
 		return m, nil
+	case "5":
+		m.switchToMode(LeftPaneModeContext)
+		return m, nil
 	}
 
 	// Context-sensitive actions based on pane and mode
@@ -1454,6 +1457,8 @@ func (m Model) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleLeaderKeyRalph(key)
 	case LeftPaneModePlan:
 		return m.handleLeaderKeyPlan(key)
+	case LeftPaneModeContext:
+		return m.handleLeaderKeyContext(key)
 	}
 
 	return m, nil
@@ -1621,9 +1626,32 @@ func (m Model) handleLeaderKeyPlan(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleLeaderKeyContext handles leader keys in context mode
+func (m Model) handleLeaderKeyContext(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "r": // Reload context
+		if ctx, err := workingctx.Load(); err == nil {
+			m.contextCurrent = ctx
+			m.addToast("Context reloaded", ToastSuccess)
+		} else {
+			m.addToast(fmt.Sprintf("Failed to reload context: %v", err), ToastError)
+		}
+	case "C": // Clear all context
+		if m.contextCurrent != nil {
+			m.contextCurrent.Clear("all")
+			if err := m.contextCurrent.Save(); err != nil {
+				m.addToast(fmt.Sprintf("Failed to clear context: %v", err), ToastError)
+			} else {
+				m.addToast("Context cleared", ToastSuccess)
+			}
+		}
+	}
+	return m, nil
+}
+
 // cycleMode cycles through the available modes
 func (m *Model) cycleMode(direction int) {
-	modes := []LeftPaneMode{LeftPaneModeHistory, LeftPaneModePrompts, LeftPaneModeRalph, LeftPaneModePlan}
+	modes := []LeftPaneMode{LeftPaneModeHistory, LeftPaneModePrompts, LeftPaneModeRalph, LeftPaneModePlan, LeftPaneModeContext}
 	currentIdx := 0
 	for i, mode := range modes {
 		if mode == m.leftPaneMode {
