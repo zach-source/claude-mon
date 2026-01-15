@@ -617,9 +617,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Save the context
 						if err := m.contextCurrent.Save(); err != nil {
 							m.addToast(fmt.Sprintf("Failed to save context: %v", err), ToastError)
-						} else {
-							m.addToast("Context updated", ToastSuccess)
+							return m, nil
 						}
+
+						// Set context using Claude CLI
+						contextBlock := m.contextCurrent.FormatForInjection()
+						if contextBlock != "" {
+							// Run claude CLI with -p flag and empty MCP servers
+							cmd := exec.Command("claude", "-p", contextBlock, "--mcp", "{}")
+							cmd.Env = append(os.Environ(), "CLAUDE_CODE_ENTRYPOINT=cli")
+
+							// Execute command asynchronously
+							return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+								if err != nil {
+									logger.Log("Failed to set context via CLI: %v", err)
+									m.addToast("Saved locally, CLI sync failed", ToastWarning)
+								} else {
+									logger.Log("Context set via Claude CLI successfully")
+									m.addToast("Context updated", ToastSuccess)
+								}
+								return nil
+							})
+						}
+
+						m.addToast("Context updated", ToastSuccess)
 					}
 				}
 				return m, nil
@@ -1859,10 +1880,9 @@ func (m Model) renderPlanList() string {
 	return sb.String()
 }
 
-// renderContextList renders the context management view for the left pane
+// renderContextList renders the context management view for the full-width pane
 func (m Model) renderContextList() string {
 	var sb strings.Builder
-	listWidth := m.width / 3
 
 	// Reload context to ensure we have latest data
 	if m.contextCurrent == nil {
@@ -1874,41 +1894,14 @@ func (m Model) renderContextList() string {
 	// Title
 	sb.WriteString(m.theme.Title.Render("⚙️ Working Context\n\n"))
 
-	// Show input field when editing
-	if m.contextEditMode {
-		var prompt string
-		switch m.contextEditField {
-		case "k8s":
-			prompt = "Enter Kubernetes context:"
-		case "aws":
-			prompt = "Enter AWS profile:"
-		case "git":
-			prompt = "Enter Git info:"
-		case "env":
-			prompt = "Enter environment variables:"
-		case "custom":
-			prompt = "Enter custom values:"
-		default:
-			prompt = "Enter value:"
-		}
-		sb.WriteString(m.theme.Normal.Render(prompt + "\n\n"))
-		sb.WriteString(m.contextEditInput.View() + "\n\n")
-		sb.WriteString(m.theme.Dim.Render("Enter:save  Esc:cancel\n\n"))
-		return sb.String()
-	}
-
 	if m.contextCurrent == nil {
 		sb.WriteString(m.theme.Dim.Render("No context available"))
 		return sb.String()
 	}
 
 	// Project info
-	sb.WriteString(m.theme.Selected.Render("📁 Project:") + "\n")
-	projectPath := m.contextCurrent.ProjectRoot
-	if len(projectPath) > listWidth-6 {
-		projectPath = "..." + projectPath[len(projectPath)-listWidth+9:]
-	}
-	sb.WriteString(m.theme.Normal.Render(projectPath) + "\n\n")
+	sb.WriteString(m.theme.Selected.Render("📁 Project:") + " ")
+	sb.WriteString(m.theme.Normal.Render(m.contextCurrent.ProjectRoot) + "\n\n")
 
 	// Show current context
 	ctx := m.contextCurrent.Format()
@@ -1945,14 +1938,14 @@ func (m Model) renderContextList() string {
 	// Help text
 	sb.WriteString("\n")
 	sb.WriteString(m.theme.Dim.Render("Actions:\n"))
-	sb.WriteString(m.theme.Normal.Render("k: Set Kubernetes\n"))
-	sb.WriteString(m.theme.Normal.Render("a: Set AWS\n"))
+	sb.WriteString(m.theme.Normal.Render("k: Set Kubernetes  "))
+	sb.WriteString(m.theme.Normal.Render("a: Set AWS  "))
 	sb.WriteString(m.theme.Normal.Render("g: Set Git\n"))
-	sb.WriteString(m.theme.Normal.Render("e: Set Env var\n"))
-	sb.WriteString(m.theme.Normal.Render("c: Set Custom\n"))
-	sb.WriteString(m.theme.Normal.Render("C: Clear section\n"))
-	sb.WriteString(m.theme.Normal.Render("r: Refresh\n"))
-	sb.WriteString(m.theme.Normal.Render("l: List all contexts"))
+	sb.WriteString(m.theme.Normal.Render("e: Set Env var  "))
+	sb.WriteString(m.theme.Normal.Render("c: Set Custom  "))
+	sb.WriteString(m.theme.Normal.Render("C: Clear all\n"))
+	sb.WriteString(m.theme.Normal.Render("r: Refresh  "))
+	sb.WriteString(m.theme.Normal.Render("l: List all contexts\n"))
 
 	return sb.String()
 }
@@ -1989,7 +1982,7 @@ func (m Model) View() string {
 	// Get left pane content first to calculate its width
 	var leftContent string
 	var leftBox lipgloss.Style
-	if !m.hideLeftPane && m.leftPaneMode != LeftPaneModeRalph {
+	if !m.hideLeftPane && m.leftPaneMode != LeftPaneModeRalph && m.leftPaneMode != LeftPaneModeContext {
 		// Both panes visible - get left content
 		switch m.leftPaneMode {
 		case LeftPaneModePrompts:
@@ -1998,8 +1991,6 @@ func (m Model) View() string {
 			leftContent = m.renderRalphStatus()
 		case LeftPaneModePlan:
 			leftContent = m.renderPlanList()
-		case LeftPaneModeContext:
-			leftContent = m.renderContextList()
 		default:
 			leftContent = m.renderHistory()
 		}
@@ -2012,8 +2003,8 @@ func (m Model) View() string {
 
 	// Calculate pane widths based on left pane content
 	var leftWidth, rightWidth int
-	if m.hideLeftPane || m.leftPaneMode == LeftPaneModeRalph {
-		// Left pane hidden or in Ralph mode (full-width right pane)
+	if m.hideLeftPane || m.leftPaneMode == LeftPaneModeRalph || m.leftPaneMode == LeftPaneModeContext {
+		// Left pane hidden or in Ralph/Context mode (full-width right pane)
 		leftWidth = 0
 		rightWidth = m.width - 2 - minimapWidth
 	} else {
@@ -2036,8 +2027,15 @@ func (m Model) View() string {
 		rightWidth = m.width - leftWidth - 3 - minimapWidth
 	}
 
-	// Render right pane (diff or prompt preview)
-	rightContent := m.diffViewport.View()
+	// Render right pane (diff, context, or prompt preview)
+	var rightContent string
+	if m.leftPaneMode == LeftPaneModeContext && !m.contextEditMode {
+		// Show context in full-width right pane
+		rightContent = m.renderContextList()
+	} else {
+		rightContent = m.diffViewport.View()
+	}
+
 	rightBox := m.theme.Border
 	if m.activePane == PaneRight {
 		rightBox = m.theme.ActiveBorder
@@ -2098,6 +2096,39 @@ func (m Model) View() string {
 
 		// Replace lines with centered popup content
 		for i, popupLine := range whichKeyLines {
+			lineIdx := startLineIdx + i
+			if lineIdx >= 0 && lineIdx < len(lines) {
+				// Create centered line: padding + popup line
+				padding := strings.Repeat(" ", targetPos)
+				lines[lineIdx] = padding + popupLine
+			}
+		}
+		mainView = strings.Join(lines, "\n")
+	}
+
+	// Overlay context edit popup in center when editing
+	if m.contextEditMode {
+		popupView := m.renderContextEditPopup()
+		popupWidth := lipgloss.Width(popupView)
+		popupLines := strings.Split(popupView, "\n")
+
+		// Split main view into lines
+		lines := strings.Split(mainView, "\n")
+
+		// Center popup vertically (accounting for header and status bar)
+		startLineIdx := (len(lines) - len(popupLines)) / 2
+		if startLineIdx < 2 {
+			startLineIdx = 2 // Leave room for header
+		}
+
+		// Center horizontally
+		targetPos := (m.width - popupWidth) / 2
+		if targetPos < 0 {
+			targetPos = 0
+		}
+
+		// Replace lines with centered popup content
+		for i, popupLine := range popupLines {
 			lineIdx := startLineIdx + i
 			if lineIdx >= 0 && lineIdx < len(lines) {
 				// Create centered line: padding + popup line
@@ -2206,6 +2237,48 @@ func (m Model) renderToasts() string {
 	}
 
 	return strings.TrimSuffix(sb.String(), "\n")
+}
+
+// renderContextEditPopup renders the centered popup for editing context values
+func (m Model) renderContextEditPopup() string {
+	if !m.contextEditMode {
+		return ""
+	}
+
+	var sb strings.Builder
+
+	// Title based on field type
+	var title string
+	var placeholder string
+	switch m.contextEditField {
+	case "k8s":
+		title = "Set Kubernetes Context"
+		placeholder = "context [namespace] [--kubeconfig path]"
+	case "aws":
+		title = "Set AWS Profile"
+		placeholder = "profile [region]"
+	case "git":
+		title = "Set Git Info"
+		placeholder = "[branch] [repo] (auto-detects if empty)"
+	case "env":
+		title = "Set Environment Variables"
+		placeholder = "KEY=VALUE [KEY2=VALUE2...]"
+	case "custom":
+		title = "Set Custom Values"
+		placeholder = "KEY=VALUE [KEY2=VALUE2...]"
+	default:
+		title = "Set Context Value"
+		placeholder = "Enter value..."
+	}
+
+	// Build popup content
+	sb.WriteString(m.theme.Title.Render(title) + "\n")
+	sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", 40)) + "\n\n")
+	sb.WriteString(m.theme.Normal.Render(placeholder) + "\n\n")
+	sb.WriteString(m.contextEditInput.View() + "\n\n")
+	sb.WriteString(m.theme.Dim.Render("Enter:save  Esc:cancel"))
+
+	return sb.String()
 }
 
 func (m Model) renderHistory() string {
