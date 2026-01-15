@@ -1922,14 +1922,14 @@ func (m Model) renderContextList() string {
 	// Help text
 	sb.WriteString("\n")
 	sb.WriteString(m.theme.Dim.Render("Actions:\n"))
-	sb.WriteString(m.theme.Normal.Render("  k: Set Kubernetes\n"))
-	sb.WriteString(m.theme.Normal.Render("  a: Set AWS\n"))
-	sb.WriteString(m.theme.Normal.Render("  g: Set Git\n"))
-	sb.WriteString(m.theme.Normal.Render("  e: Set Env var\n"))
-	sb.WriteString(m.theme.Normal.Render("  c: Set Custom\n"))
-	sb.WriteString(m.theme.Normal.Render("  C: Clear section\n"))
-	sb.WriteString(m.theme.Normal.Render("  r: Refresh\n"))
-	sb.WriteString(m.theme.Normal.Render("  l: List all contexts"))
+	sb.WriteString(m.theme.Normal.Render("k: Set Kubernetes\n"))
+	sb.WriteString(m.theme.Normal.Render("a: Set AWS\n"))
+	sb.WriteString(m.theme.Normal.Render("g: Set Git\n"))
+	sb.WriteString(m.theme.Normal.Render("e: Set Env var\n"))
+	sb.WriteString(m.theme.Normal.Render("c: Set Custom\n"))
+	sb.WriteString(m.theme.Normal.Render("C: Clear section\n"))
+	sb.WriteString(m.theme.Normal.Render("r: Refresh\n"))
+	sb.WriteString(m.theme.Normal.Render("l: List all contexts"))
 
 	return sb.String()
 }
