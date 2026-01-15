@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -220,6 +221,7 @@ type Model struct {
 	contextCurrent   *workingctx.Context   // Current project context
 	contextList      []*workingctx.Context // All project contexts
 	contextSelected  int                   // Selected context in list view
+	contextShowList  bool                  // Whether to show all contexts list
 	contextEditMode  bool                  // Whether editing context values
 	contextEditField string                // Which field is being edited
 	contextEditInput textinput.Model       // Edit input field
@@ -701,6 +703,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.contextEditField = ""
 				m.contextEditInput.Reset()
 				return m, nil
+			case "tab":
+				// Launch fzf for autocomplete based on field type
+				var cmd *exec.Cmd
+				switch m.contextEditField {
+				case "k8s":
+					// Get kubectl contexts
+					cmd = exec.Command("sh", "-c", "kubectl config get-contexts -o name 2>/dev/null | fzf --height 40% --prompt='Context: '")
+				case "aws":
+					// Get AWS profiles from ~/.aws/config and credentials
+					cmd = exec.Command("sh", "-c", "(grep '\\[profile' ~/.aws/config ~/.aws/credentials 2>/dev/null | sed 's/.*profile //\\[' | tr -d ']' | grep -v default; cat ~/.aws/credentials 2>/dev/null | grep '\\[' | sed 's/\\[//\\]') | sort -u | fzf --height 40% --prompt='Profile: '")
+				case "git":
+					// Get git branches and recent repos from zhistory
+					cmd = exec.Command("sh", "-c", "(git branch 2>/dev/null | sed 's/..//'; zsh -c 'print -rl -- ${(j:\\n:)${(k)history[(R)cd *|git *]}}' 2>/dev/null | head -20) | fzf --height 40% --prompt='Git: '")
+				case "env":
+					// Get recent env vars from zhistory
+					cmd = exec.Command("sh", "-c", "zsh -c 'print -rl -- ${(j:\\n:)${(k)history[(R)export *]}}' 2>/dev/null | sed 's/^export //' | sort -u | fzf --height 40% --prompt='Env: '")
+				case "custom":
+					// Get recent custom settings from zhistory
+					cmd = exec.Command("sh", "-c", "zsh -c 'print -rl -- ${(j:\\n:)${(k)history[(R)/prompt:*]}' 2>/dev/null | sed 's|^/prompt:context ||' | sort -u | fzf --height 40% --prompt='Custom: '")
+				default:
+					// General autocomplete from zhistory
+					cmd = exec.Command("sh", "-c", "zsh -c 'print -rl -- ${(j:\\n:)${(k)history[(R)*]}[1,100]' 2>/dev/null | fzf --height 40% --prompt='Value: '")
+				}
+
+				// Capture fzf output
+				var output bytes.Buffer
+				cmd.Stdout = &output
+
+				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+					if err != nil {
+						logger.Log("fzf cancelled or failed: %v", err)
+						return nil
+					}
+					// Set the selected value as input
+					selected := strings.TrimSpace(output.String())
+					if selected != "" {
+						m.contextEditInput.SetValue(selected)
+						m.contextEditInput.CursorEnd()
+					}
+					return nil
+				})
 			default:
 				// Forward to textinput
 				var cmd tea.Cmd
@@ -1665,66 +1708,13 @@ func (m Model) handleLeaderKeyContext(key string) (tea.Model, tea.Cmd) {
 			m.addToast(fmt.Sprintf("Failed to reload context: %v", err), ToastError)
 		}
 	case "l":
-		// List all project contexts in right pane
-		contexts, err := workingctx.ListAll()
-		if err != nil {
-			m.addToast(fmt.Sprintf("Failed to list contexts: %v", err), ToastError)
-			return m, nil
-		}
-
-		// Format the list below current context display
-		var sb strings.Builder
-		sb.WriteString("\n\n")
-		sb.WriteString(m.theme.Title.Render("All Project Contexts"))
-		sb.WriteString("\n")
-		sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", 40)))
-		sb.WriteString("\n\n")
-
-		if len(contexts) == 0 {
-			sb.WriteString(m.theme.Dim.Render("No contexts found."))
+		// Toggle showing all contexts list
+		m.contextShowList = !m.contextShowList
+		if m.contextShowList {
+			m.addToast("Showing all contexts", ToastInfo)
 		} else {
-			for _, ctx := range contexts {
-				// Project path
-				sb.WriteString(m.theme.Selected.Render("📁 " + ctx.ProjectRoot))
-				sb.WriteString("\n")
-
-				// Summary of what's set
-				var tags []string
-				if ctx.Context["kubernetes"] != nil {
-					tags = append(tags, "k8s")
-				}
-				if ctx.Context["aws"] != nil {
-					tags = append(tags, "aws")
-				}
-				if ctx.Context["git"] != nil {
-					tags = append(tags, "git")
-				}
-				if ctx.Context["env"] != nil {
-					if env, ok := ctx.Context["env"].(map[string]interface{}); ok && len(env) > 0 {
-						tags = append(tags, fmt.Sprintf("env(%d)", len(env)))
-					}
-				}
-				if ctx.Context["custom"] != nil {
-					if custom, ok := ctx.Context["custom"].(map[string]interface{}); ok && len(custom) > 0 {
-						tags = append(tags, fmt.Sprintf("custom(%d)", len(custom)))
-					}
-				}
-
-				if len(tags) > 0 {
-					sb.WriteString(m.theme.Dim.Render("  [" + strings.Join(tags, ", ") + "]"))
-				}
-				sb.WriteString("\n")
-
-				// Updated time
-				sb.WriteString(m.theme.Dim.Render("  Updated: " + ctx.GetAge()))
-				sb.WriteString("\n\n")
-			}
+			m.addToast("Hiding context list", ToastInfo)
 		}
-
-		// Append to current context view
-		currentView := m.renderContextList()
-		m.diffViewport.SetContent(currentView + sb.String())
-		m.diffViewport.GotoTop()
 	}
 	return m, nil
 }
@@ -1992,6 +1982,59 @@ func (m Model) renderContextList() string {
 		sb.WriteString("\n")
 		sb.WriteString(m.theme.Status.Render("⚠️ Context is stale (>24h)"))
 		sb.WriteString("\n")
+	}
+
+	// Show list of all contexts if requested
+	if m.contextShowList {
+		sb.WriteString("\n\n")
+		sb.WriteString(m.theme.Title.Render("All Project Contexts"))
+		sb.WriteString("\n")
+		sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", 40)))
+		sb.WriteString("\n\n")
+
+		contexts, err := workingctx.ListAll()
+		if err != nil {
+			sb.WriteString(m.theme.Dim.Render("Failed to load contexts: " + err.Error()))
+		} else if len(contexts) == 0 {
+			sb.WriteString(m.theme.Dim.Render("No contexts found."))
+		} else {
+			for _, ctx := range contexts {
+				// Project path
+				sb.WriteString(m.theme.Selected.Render("📁 " + ctx.ProjectRoot))
+				sb.WriteString("\n")
+
+				// Summary of what's set
+				var tags []string
+				if ctx.Context["kubernetes"] != nil {
+					tags = append(tags, "k8s")
+				}
+				if ctx.Context["aws"] != nil {
+					tags = append(tags, "aws")
+				}
+				if ctx.Context["git"] != nil {
+					tags = append(tags, "git")
+				}
+				if ctx.Context["env"] != nil {
+					if env, ok := ctx.Context["env"].(map[string]interface{}); ok && len(env) > 0 {
+						tags = append(tags, fmt.Sprintf("env(%d)", len(env)))
+					}
+				}
+				if ctx.Context["custom"] != nil {
+					if custom, ok := ctx.Context["custom"].(map[string]interface{}); ok && len(custom) > 0 {
+						tags = append(tags, fmt.Sprintf("custom(%d)", len(custom)))
+					}
+				}
+
+				if len(tags) > 0 {
+					sb.WriteString(m.theme.Dim.Render("  [" + strings.Join(tags, ", ") + "]"))
+				}
+				sb.WriteString("\n")
+
+				// Updated time
+				sb.WriteString(m.theme.Dim.Render("  Updated: " + ctx.GetAge()))
+				sb.WriteString("\n\n")
+			}
+		}
 	}
 
 	// Help text
@@ -2327,7 +2370,7 @@ func (m Model) renderContextEditPopup() string {
 	sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", 40)) + "\n\n")
 	sb.WriteString(m.theme.Normal.Render(placeholder) + "\n\n")
 	sb.WriteString(m.contextEditInput.View() + "\n\n")
-	sb.WriteString(m.theme.Dim.Render("Enter:save  Esc:cancel"))
+	sb.WriteString(m.theme.Dim.Render("Tab:autocomplete  Enter:save  Esc:cancel"))
 
 	return sb.String()
 }
