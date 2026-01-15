@@ -1414,8 +1414,8 @@ func (m Model) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Always exit leader mode after action
-	defer func() { m.leaderActive = false }()
+	// Exit leader mode immediately when any action key is pressed
+	m.leaderActive = false
 
 	// Global actions (available in any context)
 	switch key {
@@ -2382,8 +2382,6 @@ func (m Model) renderContextEditPopup() string {
 		return ""
 	}
 
-	var sb strings.Builder
-
 	// Title based on field type
 	var title string
 	var placeholder string
@@ -2409,13 +2407,25 @@ func (m Model) renderContextEditPopup() string {
 	}
 
 	// Build popup content
-	sb.WriteString(m.theme.Title.Render(title) + "\n")
-	sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", 40)) + "\n\n")
-	sb.WriteString(m.theme.Normal.Render(placeholder) + "\n\n")
-	sb.WriteString(m.contextEditInput.View() + "\n\n")
-	sb.WriteString(m.theme.Dim.Render("Tab:autocomplete  Enter:save  Esc:cancel"))
+	var content strings.Builder
+	content.WriteString(m.theme.Title.Render(title) + "\n")
+	content.WriteString(m.theme.Dim.Render(strings.Repeat("─", 40)) + "\n\n")
+	content.WriteString(m.theme.Normal.Render(placeholder) + "\n\n")
+	content.WriteString(m.contextEditInput.View() + "\n\n")
+	content.WriteString(m.theme.Dim.Render("Tab:autocomplete  Enter:save  Esc:cancel"))
 
-	return sb.String()
+	// Wrap content in a bordered box
+	contentStr := content.String()
+
+	// Style the popup with border and background
+	popupStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#4a4a6a")).
+		Background(lipgloss.Color("#1a1a2e")).
+		Padding(1, 2).
+		Width(lipgloss.Width(contentStr) + 4)
+
+	return popupStyle.Render(contentStr)
 }
 
 func (m Model) renderHistory() string {
