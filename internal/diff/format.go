@@ -2,12 +2,31 @@ package diff
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sergi/go-diff/diffmatchpatch"
 	"github.com/ztaylor/claude-mon/internal/theme"
 )
+
+// RelativePath converts an absolute path to a relative path from cwd
+func RelativePath(path string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return path
+	}
+	rel, err := filepath.Rel(cwd, path)
+	if err != nil {
+		return path
+	}
+	// If relative path starts with many ../, just use filename
+	if strings.HasPrefix(rel, "../../..") {
+		return filepath.Base(path)
+	}
+	return rel
+}
 
 // DiffLine represents a single line in the formatted diff
 type DiffLine struct {

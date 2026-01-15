@@ -1,6 +1,6 @@
 #!/bin/bash
 # claude-follow-tui PostToolUse hook
-# Sends tool edits to the TUI for real-time display
+# Sends tool edits to both the TUI and daemon for real-time display and persistence
 
 # Get the current directory and resolve to absolute path
 CWD="$(cd "$(pwd)" && pwd)"
@@ -21,10 +21,65 @@ HASH="$(echo -n "$CWD" | sha256sum | cut -c1-12)"
 # Get username
 USER="${USER:-unknown}"
 
-# Socket path
-SOCKET_PATH="/tmp/claude-follow-tui-${USER}-${HASH}.sock"
+# Socket paths
+TUI_SOCKET="/tmp/claude-mon-${USER}-${HASH}.sock"
+DAEMON_SOCKET="/tmp/claude-mon-daemon.sock"
 
-# Send to TUI if socket exists
-if [[ -S "$SOCKET_PATH" ]]; then
-    echo "$TOOL_INPUT" | nc -U "$SOCKET_PATH" &
+# Send to TUI if socket exists (raw TOOL_INPUT)
+if [[ -S "$TUI_SOCKET" ]]; then
+    echo "$TOOL_INPUT" | nc -U "$TUI_SOCKET" &
+fi
+
+# Send to daemon if socket exists (formatted payload)
+if [[ -S "$DAEMON_SOCKET" ]] && command -v jq &>/dev/null; then
+    # Parse tool input
+    TOOL_NAME="${TOOL_NAME:-unknown}"
+    FILE_PATH=$(echo "$TOOL_INPUT" | jq -r '.file_path // .path // empty' 2>/dev/null)
+    OLD_STRING=$(echo "$TOOL_INPUT" | jq -r '.old_string // empty' 2>/dev/null | head -c 10000)
+    NEW_STRING=$(echo "$TOOL_INPUT" | jq -r '.new_string // .content // empty' 2>/dev/null | head -c 10000)
+
+    if [[ -n "$FILE_PATH" ]]; then
+        # Get git info
+        BRANCH=""
+        COMMIT_SHA=""
+        if git rev-parse --git-dir &>/dev/null; then
+            BRANCH=$(git branch --show-current 2>/dev/null || echo "")
+            COMMIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
+        fi
+
+        # Calculate line count
+        LINE_COUNT=0
+        if [[ -n "$NEW_STRING" ]]; then
+            LINE_COUNT=$(echo "$NEW_STRING" | wc -l | tr -d ' ')
+        fi
+
+        # Create daemon payload
+        PAYLOAD=$(jq -n \
+            --arg type "edit" \
+            --arg workspace "$CWD" \
+            --arg workspace_name "$(basename "$CWD")" \
+            --arg branch "$BRANCH" \
+            --arg commit_sha "$COMMIT_SHA" \
+            --arg tool_name "$TOOL_NAME" \
+            --arg file_path "$FILE_PATH" \
+            --arg old_string "$OLD_STRING" \
+            --arg new_string "$NEW_STRING" \
+            --argjson line_num 0 \
+            --argjson line_count "$LINE_COUNT" \
+            '{
+                type: $type,
+                workspace: $workspace,
+                workspace_name: $workspace_name,
+                branch: $branch,
+                commit_sha: $commit_sha,
+                tool_name: $tool_name,
+                file_path: $file_path,
+                old_string: $old_string,
+                new_string: $new_string,
+                line_num: $line_num,
+                line_count: $line_count
+            }')
+
+        echo "$PAYLOAD" | nc -U "$DAEMON_SOCKET" &
+    fi
 fi

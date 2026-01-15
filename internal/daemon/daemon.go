@@ -289,10 +289,11 @@ func sqlInt64(v int64) sql.NullInt64 {
 
 // Query represents a database query
 type Query struct {
-	Type     string `json:"type"` // "recent", "file", "prompts", "sessions"
-	FilePath string `json:"file_path,omitempty"`
-	Name     string `json:"name,omitempty"`
-	Limit    int    `json:"limit,omitempty"`
+	Type          string `json:"type"` // "recent", "workspace", "file", "prompts", "sessions"
+	WorkspacePath string `json:"workspace_path,omitempty"`
+	FilePath      string `json:"file_path,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Limit         int    `json:"limit,omitempty"`
 }
 
 // QueryResult represents query results
@@ -325,6 +326,18 @@ func (d *Daemon) executeQuery(query *Query) (*QueryResult, error) {
 	switch query.Type {
 	case "recent":
 		edits, err := d.db.GetRecentEdits(limit)
+		if err != nil {
+			return nil, err
+		}
+		if edits != nil {
+			result.Edits = edits
+		}
+
+	case "workspace":
+		if query.WorkspacePath == "" {
+			return nil, fmt.Errorf("workspace_path required for workspace queries")
+		}
+		edits, err := d.db.GetEditsByWorkspace(query.WorkspacePath, limit)
 		if err != nil {
 			return nil, err
 		}

@@ -137,15 +137,15 @@ func (d *DB) GetSession(id int64) (*Session, error) {
 
 // Edit represents a file edit
 type Edit struct {
-	ID        int64
-	SessionID int64
-	ToolName  string
-	FilePath  string
-	OldString string
-	NewString string
-	LineNum   int
-	LineCount int
-	Timestamp time.Time
+	ID        int64     `json:"id"`
+	SessionID int64     `json:"session_id"`
+	ToolName  string    `json:"tool_name"`
+	FilePath  string    `json:"file_path"`
+	OldString string    `json:"old_string"`
+	NewString string    `json:"new_string"`
+	LineNum   int       `json:"line_num"`
+	LineCount int       `json:"line_count"`
+	Timestamp time.Time `json:"created_at"`
 }
 
 // RecordEdit records a file edit
@@ -266,6 +266,41 @@ func (d *DB) GetRecentEdits(limit int) ([]*Edit, error) {
 	rows, err := d.db.Query(query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get recent edits: %w", err)
+	}
+	defer rows.Close()
+
+	var edits []*Edit
+	for rows.Next() {
+		var e Edit
+		err := rows.Scan(
+			&e.ID, &e.SessionID, &e.ToolName, &e.FilePath,
+			&e.OldString, &e.NewString, &e.LineNum, &e.LineCount, &e.Timestamp,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan edit: %w", err)
+		}
+
+		edits = append(edits, &e)
+	}
+
+	return edits, nil
+}
+
+// GetEditsByWorkspace retrieves recent edits for a specific workspace
+func (d *DB) GetEditsByWorkspace(workspacePath string, limit int) ([]*Edit, error) {
+	query := `
+		SELECT e.id, e.session_id, e.tool_name, e.file_path,
+		       e.old_string, e.new_string, e.line_num, e.line_count, e.timestamp
+		FROM edits e
+		JOIN sessions s ON e.session_id = s.id
+		WHERE s.workspace_path = ?
+		ORDER BY e.timestamp DESC
+		LIMIT ?
+	`
+
+	rows, err := d.db.Query(query, workspacePath, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get edits by workspace: %w", err)
 	}
 	defer rows.Close()
 

@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -29,69 +31,6 @@ import (
 	"github.com/ztaylor/claude-mon/internal/ralph"
 	"github.com/ztaylor/claude-mon/internal/theme"
 )
-
-// SocketMsg is sent when data is received from the socket
-type SocketMsg struct {
-	Payload []byte
-}
-
-// promptEditedMsg is sent when nvim finishes editing a prompt
-type promptEditedMsg struct {
-	path string
-}
-
-// promptRefinedMsg is sent when Claude CLI finishes refining a prompt
-type promptRefinedMsg struct {
-	originalPath string
-	refinedPath  string
-}
-
-// promptRefineErrorMsg is sent when refining fails
-type promptRefineErrorMsg struct {
-	err error
-}
-
-// promptRefineInputMsg is sent when user submits refinement request
-type promptRefineInputMsg struct {
-	request string
-}
-
-// promptRefineOutputMsg is sent when Claude CLI outputs a line during refinement
-type promptRefineOutputMsg struct {
-	line string
-}
-
-// promptRefineCompleteMsg is sent when Claude CLI finishes refinement
-type promptRefineCompleteMsg struct {
-	output string
-}
-
-// planGeneratingMsg is sent when plan generation starts
-type planGeneratingMsg struct{}
-
-// planGeneratedMsg is sent when plan generation completes
-type planGeneratedMsg struct {
-	path string
-	slug string
-}
-
-// planGenerateErrorMsg is sent when plan generation fails
-type planGenerateErrorMsg struct {
-	err error
-}
-
-// planEditedMsg is sent when plan editing completes
-type planEditedMsg struct{}
-
-// leaderTimeoutMsg is sent when leader mode should auto-dismiss
-type leaderTimeoutMsg struct {
-	activatedAt time.Time // To verify we're timing out the right activation
-}
-
-// ralphRefreshTickMsg is sent to trigger Ralph state refresh
-type ralphRefreshTickMsg struct {
-	time.Time
-}
 
 // Change represents a single file change from Claude
 type Change struct {
@@ -165,28 +104,30 @@ const (
 
 // Model is the Bubbletea model
 type Model struct {
-	socketPath     string
-	width          int
-	height         int
-	activePane     Pane
-	leftPaneMode   LeftPaneMode // History or Prompts mode
-	changes        []Change
-	selectedIndex  int
-	diffViewport   viewport.Model
-	showHelp       bool
-	showMinimap    bool // Toggle minimap visibility
-	planContent    string
-	planPath       string
-	planViewport   viewport.Model
-	ready          bool
-	theme          *theme.Theme
-	highlighter    *highlight.Highlighter
-	scrollX        int              // Horizontal scroll offset
-	totalLines     int              // Total lines in current file (for minimap)
-	minimapData    *minimap.Minimap // Cached minimap line types
-	diffCache      map[int]string   // Cached rendered diffs by index
-	historyStore   *history.Store   // Persistent history storage
-	persistHistory bool             // Whether to save history to file
+	socketPath      string
+	socketConnected bool      // Whether socket is listening
+	lastMsgTime     time.Time // Time of last received message
+	width           int
+	height          int
+	activePane      Pane
+	leftPaneMode    LeftPaneMode // History or Prompts mode
+	changes         []Change
+	selectedIndex   int
+	diffViewport    viewport.Model
+	showHelp        bool
+	showMinimap     bool // Toggle minimap visibility
+	planContent     string
+	planPath        string
+	planViewport    viewport.Model
+	ready           bool
+	theme           *theme.Theme
+	highlighter     *highlight.Highlighter
+	scrollX         int              // Horizontal scroll offset
+	totalLines      int              // Total lines in current file (for minimap)
+	minimapData     *minimap.Minimap // Cached minimap line types
+	diffCache       map[int]string   // Cached rendered diffs by index
+	historyStore    *history.Store   // Persistent history storage
+	persistHistory  bool             // Whether to save history to file
 
 	// Prompt manager (integrated in left pane)
 	promptStore          *prompt.Store          // Prompt storage
@@ -236,6 +177,10 @@ type Model struct {
 
 	// Configuration
 	config *config.Config // User configuration
+
+	// Keybindings (bubbles/key integration)
+	keyMap KeyMap     // KeyMap with help text for bubbles/help
+	help   help.Model // bubbles/help for rendering keybinding help
 }
 
 // Option is a functional option for configuring the Model
@@ -278,22 +223,25 @@ func New(socketPath string, opts ...Option) Model {
 	}
 
 	m := Model{
-		socketPath:   socketPath,
-		changes:      []Change{},
-		activePane:   PaneLeft,
-		leftPaneMode: LeftPaneModeHistory,
-		showMinimap:  true,
-		theme:        t,
-		highlighter:  highlight.NewHighlighter(t),
-		diffCache:    make(map[int]string),
-		config:       cfg,
+		socketPath:      socketPath,
+		socketConnected: socketPath != "", // Socket is listening if path provided
+		changes:         []Change{},
+		activePane:      PaneLeft,
+		leftPaneMode:    LeftPaneModeHistory,
+		showMinimap:     true,
+		theme:           t,
+		highlighter:     highlight.NewHighlighter(t),
+		diffCache:       make(map[int]string),
+		config:          cfg,
+		keyMap:          FromConfig(cfg),
+		help:            help.New(),
 	}
 
 	for _, opt := range opts {
 		opt(&m)
 	}
 
-	// If config was changed via option, update theme to match
+	// If config was changed via option, update theme and keymap to match
 	if m.config != cfg {
 		cfg = m.config
 		t = theme.Get(cfg.Theme)
@@ -302,6 +250,7 @@ func New(socketPath string, opts ...Option) Model {
 		}
 		m.theme = t
 		m.highlighter = highlight.NewHighlighter(t)
+		m.keyMap = FromConfig(cfg)
 	}
 
 	// Recreate highlighter if theme was changed via option
@@ -390,7 +339,108 @@ func New(socketPath string, opts ...Option) Model {
 
 // Init implements tea.Model
 func (m Model) Init() tea.Cmd {
-	return nil
+	// Use tea.Batch to run multiple initializations concurrently
+	return tea.Batch(
+		// Start toast cleanup ticker
+		m.startToastCleanupTicker(),
+		// Pre-load context if available
+		m.loadContextCmd(),
+		// Query daemon for recent history
+		m.queryDaemonHistoryCmd(),
+	)
+}
+
+// startToastCleanupTicker returns a command to periodically clean expired toasts
+func (m Model) startToastCleanupTicker() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return toastCleanupTickMsg{Time: t}
+	})
+}
+
+// loadContextCmd returns a command to load context asynchronously
+func (m Model) loadContextCmd() tea.Cmd {
+	return func() tea.Msg {
+		return contextLoadedMsg{}
+	}
+}
+
+// queryDaemonHistoryCmd queries the daemon for edit history for current workspace
+func (m Model) queryDaemonHistoryCmd() tea.Cmd {
+	return func() tea.Msg {
+		// Get current workspace path
+		workspacePath, err := os.Getwd()
+		if err != nil {
+			logger.Log("Failed to get working directory: %v", err)
+			return daemonHistoryMsg{err: err}
+		}
+
+		// Try to connect to daemon query socket
+		querySocket := "/tmp/claude-mon-query.sock"
+		conn, err := net.DialTimeout("unix", querySocket, 2*time.Second)
+		if err != nil {
+			logger.Log("Daemon not available: %v", err)
+			return daemonHistoryMsg{err: err}
+		}
+		defer conn.Close()
+
+		// Set read/write deadline
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+		// Send query for edits in this workspace
+		query := map[string]interface{}{
+			"type":           "workspace",
+			"workspace_path": workspacePath,
+			"limit":          100,
+		}
+		if err := json.NewEncoder(conn).Encode(query); err != nil {
+			logger.Log("Failed to send query: %v", err)
+			return daemonHistoryMsg{err: err}
+		}
+
+		// Read response
+		var result struct {
+			Type  string `json:"type"`
+			Edits []struct {
+				ID        int64     `json:"id"`
+				SessionID int64     `json:"session_id"`
+				ToolName  string    `json:"tool_name"`
+				FilePath  string    `json:"file_path"`
+				OldString string    `json:"old_string"`
+				NewString string    `json:"new_string"`
+				LineNum   int       `json:"line_num"`
+				LineCount int       `json:"line_count"`
+				CreatedAt time.Time `json:"created_at"`
+			} `json:"edits"`
+			Error string `json:"error,omitempty"`
+		}
+
+		if err := json.NewDecoder(conn).Decode(&result); err != nil {
+			logger.Log("Failed to decode response: %v", err)
+			return daemonHistoryMsg{err: err}
+		}
+
+		if result.Error != "" {
+			logger.Log("Daemon error: %s", result.Error)
+			return daemonHistoryMsg{err: fmt.Errorf("daemon: %s", result.Error)}
+		}
+
+		// Convert edits to changes
+		var changes []Change
+		for _, edit := range result.Edits {
+			changes = append(changes, Change{
+				Timestamp: edit.CreatedAt,
+				FilePath:  edit.FilePath,
+				ToolName:  edit.ToolName,
+				OldString: edit.OldString,
+				NewString: edit.NewString,
+				LineNum:   edit.LineNum,
+				LineCount: edit.LineCount,
+			})
+		}
+
+		logger.Log("Loaded %d edits from daemon", len(changes))
+		return daemonHistoryMsg{changes: changes}
+	}
 }
 
 // LeaderActivatedAt returns when leader mode was activated
@@ -436,6 +486,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ready = true
+
+		// Update help width for bubbles/help
+		m.help.Width = msg.Width
 
 		// Initialize/resize viewport for diff
 		headerHeight := 3
@@ -829,6 +882,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case SocketMsg:
 		logger.Log("SocketMsg received, payload size: %d bytes", len(msg.Payload))
+		m.lastMsgTime = time.Now() // Track last message for status indicator
 
 		// Extract plan_path from payload if present (sent by hook)
 		var planInfo struct {
@@ -1000,6 +1054,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
 				return ralphRefreshTickMsg{Time: t}
 			})
+		}
+
+	case toastCleanupTickMsg:
+		// Clean expired toasts and keep ticker running
+		m.cleanExpiredToasts()
+		return m, m.startToastCleanupTicker()
+
+	case contextLoadedMsg:
+		// Context loaded - nothing to do, already handled in New()
+
+	case daemonHistoryMsg:
+		if msg.err != nil {
+			// Daemon not available - that's OK, we can still receive live updates
+			logger.Log("Daemon query failed (will use live updates): %v", msg.err)
+		} else if len(msg.changes) > 0 {
+			// Only add changes we don't already have (avoid duplicates with local history)
+			existingPaths := make(map[string]bool)
+			for _, c := range m.changes {
+				key := fmt.Sprintf("%s:%s:%d", c.FilePath, c.Timestamp.Format(time.RFC3339), c.LineNum)
+				existingPaths[key] = true
+			}
+
+			for _, c := range msg.changes {
+				key := fmt.Sprintf("%s:%s:%d", c.FilePath, c.Timestamp.Format(time.RFC3339), c.LineNum)
+				if !existingPaths[key] {
+					m.changes = append(m.changes, c)
+				}
+			}
+
+			// Select most recent
+			if len(m.changes) > 0 {
+				m.selectedIndex = len(m.changes) - 1
+				m.diffViewport.SetContent(m.renderDiff())
+			}
+			m.lastMsgTime = time.Now()
+			logger.Log("Added %d changes from daemon, total now: %d", len(msg.changes), len(m.changes))
 		}
 	}
 
@@ -3079,6 +3169,8 @@ func (m Model) renderStatus() string {
 		modeName = "Ralph"
 	case LeftPaneModePlan:
 		modeName = "Plan"
+	case LeftPaneModeContext:
+		modeName = "Context"
 	}
 
 	paneIndicator := "L"
@@ -3086,10 +3178,36 @@ func (m Model) renderStatus() string {
 		paneIndicator = "R"
 	}
 
-	// Show: mode, pane, navigation, and leader key
-	return m.theme.Status.Render(fmt.Sprintf(
+	// Socket connection indicator
+	socketIndicator := "○" // Disconnected/no recent activity
+	socketStyle := m.theme.Dim
+	if m.socketConnected {
+		if time.Since(m.lastMsgTime) < 30*time.Second {
+			socketIndicator = "●" // Connected with recent activity
+			socketStyle = m.theme.Added
+		} else {
+			socketIndicator = "◐" // Connected but idle
+			socketStyle = m.theme.Modified
+		}
+	}
+
+	// Build status: left side info, right side socket indicator
+	leftStatus := fmt.Sprintf(
 		"%s [%s]  %s/%s:nav  Tab:mode  [/]:pane  ^G:menu",
-		modeName, paneIndicator, k.Down, k.Up))
+		modeName, paneIndicator, k.Down, k.Up)
+
+	// Calculate padding to push socket indicator to right
+	statusWidth := m.width - 2
+	leftLen := len(leftStatus)
+	rightPart := socketStyle.Render(socketIndicator)
+	rightLen := 1 // Just the symbol
+
+	padding := statusWidth - leftLen - rightLen
+	if padding < 1 {
+		padding = 1
+	}
+
+	return m.theme.Status.Render(leftStatus + strings.Repeat(" ", padding) + rightPart)
 }
 
 func (m Model) renderHelp() string {
@@ -3176,6 +3294,28 @@ func (m Model) renderHelp() string {
 	help.WriteString("  Press any key to close help\n")
 
 	return m.theme.Help.Render(help.String())
+}
+
+// renderHelpBar renders a compact help bar using bubbles/help
+func (m Model) renderHelpBar() string {
+	// Get mode name for mode-specific keybindings
+	mode := ""
+	switch m.leftPaneMode {
+	case LeftPaneModeHistory:
+		mode = "history"
+	case LeftPaneModePrompts:
+		mode = "prompts"
+	case LeftPaneModeRalph:
+		mode = "ralph"
+	case LeftPaneModePlan:
+		mode = "plan"
+	case LeftPaneModeContext:
+		mode = "context"
+	}
+
+	// Use ModeKeyMap for mode-specific help
+	modeKeyMap := NewModeKeyMap(m.keyMap, mode)
+	return m.help.View(modeKeyMap)
 }
 
 // WhichKeyItem represents a single item in the which-key popup
