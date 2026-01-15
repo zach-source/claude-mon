@@ -1874,6 +1874,29 @@ func (m Model) renderContextList() string {
 	// Title
 	sb.WriteString(m.theme.Title.Render("⚙️ Working Context\n\n"))
 
+	// Show input field when editing
+	if m.contextEditMode {
+		var prompt string
+		switch m.contextEditField {
+		case "k8s":
+			prompt = "Enter Kubernetes context:"
+		case "aws":
+			prompt = "Enter AWS profile:"
+		case "git":
+			prompt = "Enter Git info:"
+		case "env":
+			prompt = "Enter environment variables:"
+		case "custom":
+			prompt = "Enter custom values:"
+		default:
+			prompt = "Enter value:"
+		}
+		sb.WriteString(m.theme.Normal.Render(prompt + "\n\n"))
+		sb.WriteString(m.contextEditInput.View() + "\n\n")
+		sb.WriteString(m.theme.Dim.Render("Enter:save  Esc:cancel\n\n"))
+		return sb.String()
+	}
+
 	if m.contextCurrent == nil {
 		sb.WriteString(m.theme.Dim.Render("No context available"))
 		return sb.String()
