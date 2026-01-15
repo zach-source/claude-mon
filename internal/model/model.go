@@ -620,11 +620,62 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return m, nil
 						}
 
-						// Set context using Claude CLI
-						contextBlock := m.contextCurrent.FormatForInjection()
-						if contextBlock != "" {
-							// Run claude CLI with -p flag and empty MCP servers
-							cmd := exec.Command("claude", "-p", contextBlock, "--mcp", "{}")
+						// Set context using Claude CLI with /command format
+						var cmdStr string
+						switch m.contextEditField {
+						case "k8s":
+							k8s := m.contextCurrent.GetKubernetes()
+							if k8s != nil {
+								cmdStr = fmt.Sprintf("/k8s %s", k8s.Context)
+								if k8s.Namespace != "" {
+									cmdStr += " " + k8s.Namespace
+								}
+								if k8s.Kubeconfig != "" {
+									cmdStr += " --kubeconfig " + k8s.Kubeconfig
+								}
+							}
+						case "aws":
+							aws := m.contextCurrent.GetAWS()
+							if aws != nil {
+								cmdStr = fmt.Sprintf("/aws %s", aws.Profile)
+								if aws.Region != "" {
+									cmdStr += " " + aws.Region
+								}
+							}
+						case "git":
+							git := m.contextCurrent.GetGit()
+							if git != nil {
+								cmdStr = "/git"
+								if git.Branch != "" {
+									cmdStr += " " + git.Branch
+								}
+								if git.Repo != "" {
+									cmdStr += " " + git.Repo
+								}
+							}
+						case "env":
+							env := m.contextCurrent.GetEnv()
+							if env != nil && len(env) > 0 {
+								var parts []string
+								for k, v := range env {
+									parts = append(parts, fmt.Sprintf("%s=%s", k, v))
+								}
+								cmdStr = "/env " + strings.Join(parts, " ")
+							}
+						case "custom":
+							custom := m.contextCurrent.GetCustom()
+							if custom != nil && len(custom) > 0 {
+								var parts []string
+								for k, v := range custom {
+									parts = append(parts, fmt.Sprintf("%s=%s", k, v))
+								}
+								cmdStr = "/custom " + strings.Join(parts, " ")
+							}
+						}
+
+						if cmdStr != "" {
+							// Run claude CLI with /command
+							cmd := exec.Command("claude", "-p", cmdStr, "--mcp", "{}")
 							cmd.Env = append(os.Environ(), "CLAUDE_CODE_ENTRYPOINT=cli")
 
 							// Execute command asynchronously
@@ -633,7 +684,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 									logger.Log("Failed to set context via CLI: %v", err)
 									m.addToast("Saved locally, CLI sync failed", ToastWarning)
 								} else {
-									logger.Log("Context set via Claude CLI successfully")
+									logger.Log("Context set via Claude CLI: %s", cmdStr)
 									m.addToast("Context updated", ToastSuccess)
 								}
 								return nil
@@ -1289,112 +1340,9 @@ func (m Model) generatePlan(description string) tea.Cmd {
 }
 
 // handleContextKeys handles key events in Context mode
+// All context actions are now behind leader key, so this only handles scrolling
 func (m Model) handleContextKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
-
-	switch key {
-	case "k":
-		// Set Kubernetes context
-		m.contextEditMode = true
-		m.contextEditField = "k8s"
-		m.contextEditInput.Placeholder = "context [namespace] [--kubeconfig path]"
-		m.contextEditInput.Reset()
-		m.contextEditInput.Focus()
-		return m, textinput.Blink
-	case "a":
-		// Set AWS profile
-		m.contextEditMode = true
-		m.contextEditField = "aws"
-		m.contextEditInput.Placeholder = "profile [region]"
-		m.contextEditInput.Reset()
-		m.contextEditInput.Focus()
-		return m, textinput.Blink
-	case "g":
-		// Set Git context
-		m.contextEditMode = true
-		m.contextEditField = "git"
-		m.contextEditInput.Placeholder = "[branch] [repo] (auto-detects if empty)"
-		m.contextEditInput.Reset()
-		m.contextEditInput.Focus()
-		return m, textinput.Blink
-	case "e":
-		// Set environment variables
-		m.contextEditMode = true
-		m.contextEditField = "env"
-		m.contextEditInput.Placeholder = "KEY=VALUE [KEY2=VALUE2...]"
-		m.contextEditInput.Reset()
-		m.contextEditInput.Focus()
-		return m, textinput.Blink
-	case "c":
-		// Set custom values
-		m.contextEditMode = true
-		m.contextEditField = "custom"
-		m.contextEditInput.Placeholder = "KEY=VALUE [KEY2=VALUE2...]"
-		m.contextEditInput.Reset()
-		m.contextEditInput.Focus()
-		return m, textinput.Blink
-	case "C":
-		// Clear context section
-		// For simplicity, clear all for now
-		if m.contextCurrent != nil {
-			m.contextCurrent.Clear("all")
-			if err := m.contextCurrent.Save(); err != nil {
-				m.addToast(fmt.Sprintf("Failed to clear context: %v", err), ToastError)
-			} else {
-				m.addToast("Context cleared", ToastSuccess)
-			}
-		}
-		return m, nil
-	case "r":
-		// Reload context from disk
-		if ctx, err := workingctx.Load(); err == nil {
-			m.contextCurrent = ctx
-			m.addToast("Context reloaded", ToastSuccess)
-		} else {
-			m.addToast(fmt.Sprintf("Failed to reload context: %v", err), ToastError)
-		}
-		return m, nil
-	case "l":
-		// List all project contexts in right pane
-		contexts, err := workingctx.ListAll()
-		if err != nil {
-			m.addToast(fmt.Sprintf("Failed to list contexts: %v", err), ToastError)
-			return m, nil
-		}
-
-		// Format the list
-		var sb strings.Builder
-		sb.WriteString("## All Project Contexts\n\n")
-
-		if len(contexts) == 0 {
-			sb.WriteString("No contexts found.")
-		} else {
-			for _, ctx := range contexts {
-				sb.WriteString(fmt.Sprintf("### %s\n", ctx.ProjectRoot))
-				summary := []string{}
-				if ctx.Context["kubernetes"] != nil {
-					summary = append(summary, "k8s")
-				}
-				if ctx.Context["aws"] != nil {
-					summary = append(summary, "aws")
-				}
-				if ctx.Context["custom"] != nil {
-					if custom, ok := ctx.Context["custom"].(map[string]interface{}); ok {
-						summary = append(summary, fmt.Sprintf("%d custom", len(custom)))
-					}
-				}
-
-				if len(summary) > 0 {
-					sb.WriteString(fmt.Sprintf("[%s] ", strings.Join(summary, ", ")))
-				}
-				sb.WriteString(fmt.Sprintf("Updated: %s\n\n", ctx.GetAge()))
-			}
-		}
-
-		m.diffViewport.SetContent(sb.String())
-		m.diffViewport.GotoTop()
-		return m, nil
-	}
 
 	// Handle scrolling in right pane
 	if m.activePane == PaneRight {
@@ -1650,22 +1598,133 @@ func (m Model) handleLeaderKeyPlan(key string) (tea.Model, tea.Cmd) {
 // handleLeaderKeyContext handles leader keys in context mode
 func (m Model) handleLeaderKeyContext(key string) (tea.Model, tea.Cmd) {
 	switch key {
-	case "r": // Reload context
+	case "k":
+		// Set Kubernetes context using /k8s command
+		m.contextEditMode = true
+		m.contextEditField = "k8s"
+		m.contextEditInput.Placeholder = "context [namespace] [--kubeconfig path]"
+		m.contextEditInput.Reset()
+		m.contextEditInput.Focus()
+		return m, textinput.Blink
+	case "a":
+		// Set AWS profile using /aws command
+		m.contextEditMode = true
+		m.contextEditField = "aws"
+		m.contextEditInput.Placeholder = "profile [region]"
+		m.contextEditInput.Reset()
+		m.contextEditInput.Focus()
+		return m, textinput.Blink
+	case "g":
+		// Set Git info using /git command
+		m.contextEditMode = true
+		m.contextEditField = "git"
+		m.contextEditInput.Placeholder = "[branch] [repo] (auto-detects if empty)"
+		m.contextEditInput.Reset()
+		m.contextEditInput.Focus()
+		return m, textinput.Blink
+	case "e":
+		// Set environment variables using /env command
+		m.contextEditMode = true
+		m.contextEditField = "env"
+		m.contextEditInput.Placeholder = "KEY=VALUE [KEY2=VALUE2...]"
+		m.contextEditInput.Reset()
+		m.contextEditInput.Focus()
+		return m, textinput.Blink
+	case "c":
+		// Set custom values using /custom command
+		m.contextEditMode = true
+		m.contextEditField = "custom"
+		m.contextEditInput.Placeholder = "KEY=VALUE [KEY2=VALUE2...]"
+		m.contextEditInput.Reset()
+		m.contextEditInput.Focus()
+		return m, textinput.Blink
+	case "C":
+		// Clear all context
+		if m.contextCurrent != nil {
+			m.contextCurrent.Clear("all")
+			if err := m.contextCurrent.Save(); err != nil {
+				m.addToast(fmt.Sprintf("Failed to clear context: %v", err), ToastError)
+			} else {
+				// Also clear via CLI
+				cmd := exec.Command("claude", "-p", "/prompt:context clear", "--mcp", "{}")
+				cmd.Env = append(os.Environ(), "CLAUDE_CODE_ENTRYPOINT=cli")
+				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+					if err != nil {
+						logger.Log("Failed to clear context via CLI: %v", err)
+					}
+					return nil
+				})
+			}
+		}
+	case "r":
+		// Reload context from disk
 		if ctx, err := workingctx.Load(); err == nil {
 			m.contextCurrent = ctx
 			m.addToast("Context reloaded", ToastSuccess)
 		} else {
 			m.addToast(fmt.Sprintf("Failed to reload context: %v", err), ToastError)
 		}
-	case "C": // Clear all context
-		if m.contextCurrent != nil {
-			m.contextCurrent.Clear("all")
-			if err := m.contextCurrent.Save(); err != nil {
-				m.addToast(fmt.Sprintf("Failed to clear context: %v", err), ToastError)
-			} else {
-				m.addToast("Context cleared", ToastSuccess)
+	case "l":
+		// List all project contexts in right pane
+		contexts, err := workingctx.ListAll()
+		if err != nil {
+			m.addToast(fmt.Sprintf("Failed to list contexts: %v", err), ToastError)
+			return m, nil
+		}
+
+		// Format the list below current context display
+		var sb strings.Builder
+		sb.WriteString("\n\n")
+		sb.WriteString(m.theme.Title.Render("All Project Contexts"))
+		sb.WriteString("\n")
+		sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", 40)))
+		sb.WriteString("\n\n")
+
+		if len(contexts) == 0 {
+			sb.WriteString(m.theme.Dim.Render("No contexts found."))
+		} else {
+			for _, ctx := range contexts {
+				// Project path
+				sb.WriteString(m.theme.Selected.Render("📁 " + ctx.ProjectRoot))
+				sb.WriteString("\n")
+
+				// Summary of what's set
+				var tags []string
+				if ctx.Context["kubernetes"] != nil {
+					tags = append(tags, "k8s")
+				}
+				if ctx.Context["aws"] != nil {
+					tags = append(tags, "aws")
+				}
+				if ctx.Context["git"] != nil {
+					tags = append(tags, "git")
+				}
+				if ctx.Context["env"] != nil {
+					if env, ok := ctx.Context["env"].(map[string]interface{}); ok && len(env) > 0 {
+						tags = append(tags, fmt.Sprintf("env(%d)", len(env)))
+					}
+				}
+				if ctx.Context["custom"] != nil {
+					if custom, ok := ctx.Context["custom"].(map[string]interface{}); ok && len(custom) > 0 {
+						tags = append(tags, fmt.Sprintf("custom(%d)", len(custom)))
+					}
+				}
+
+				if len(tags) > 0 {
+					sb.WriteString(m.theme.Dim.Render("  [" + strings.Join(tags, ", ") + "]"))
+				}
+				sb.WriteString("\n")
+
+				// Updated time
+				sb.WriteString(m.theme.Dim.Render("  Updated: " + ctx.GetAge()))
+				sb.WriteString("\n\n")
 			}
 		}
+
+		// Append to current context view
+		currentView := m.renderContextList()
+		m.diffViewport.SetContent(currentView + sb.String())
+		m.diffViewport.GotoTop()
 	}
 	return m, nil
 }
@@ -1937,15 +1996,7 @@ func (m Model) renderContextList() string {
 
 	// Help text
 	sb.WriteString("\n")
-	sb.WriteString(m.theme.Dim.Render("Actions:\n"))
-	sb.WriteString(m.theme.Normal.Render("k: Set Kubernetes  "))
-	sb.WriteString(m.theme.Normal.Render("a: Set AWS  "))
-	sb.WriteString(m.theme.Normal.Render("g: Set Git\n"))
-	sb.WriteString(m.theme.Normal.Render("e: Set Env var  "))
-	sb.WriteString(m.theme.Normal.Render("c: Set Custom  "))
-	sb.WriteString(m.theme.Normal.Render("C: Clear all\n"))
-	sb.WriteString(m.theme.Normal.Render("r: Refresh  "))
-	sb.WriteString(m.theme.Normal.Render("l: List all contexts\n"))
+	sb.WriteString(m.theme.Dim.Render("Press Ctrl+G for context actions"))
 
 	return sb.String()
 }
@@ -3088,6 +3139,18 @@ func (m Model) renderWhichKey() string {
 				{Key: "r", Description: "refresh view"},
 				{Key: "s", Description: "run plan"},
 				{Key: "A", Description: "plan chat"},
+			}
+		case LeftPaneModeContext:
+			context = "CONTEXT"
+			contextItems = []WhichKeyItem{
+				{Key: "k", Description: "set Kubernetes"},
+				{Key: "a", Description: "set AWS"},
+				{Key: "g", Description: "set Git"},
+				{Key: "e", Description: "set Env var"},
+				{Key: "c", Description: "set Custom"},
+				{Key: "C", Description: "clear all"},
+				{Key: "r", Description: "reload"},
+				{Key: "l", Description: "list all"},
 			}
 		}
 	}
