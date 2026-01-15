@@ -1,7 +1,3 @@
-version: "2"
 linters:
-  disable:
-    - errcheck
-    - staticcheck
-    - unused
-    - ineffassign
+  errcheck:
+    disable: true

@@ -1639,6 +1639,7 @@ func (m *Model) cycleMode(direction int) {
 // switchToMode switches to a specific mode
 func (m *Model) switchToMode(mode LeftPaneMode) {
 	prevMode := m.leftPaneMode
+	logger.Log("switchToMode: %d -> %d", prevMode, mode)
 	m.leftPaneMode = mode
 	m.activePane = PaneLeft
 	m.promptShowVersions = false
