@@ -10,8 +10,8 @@ func Dark() *Theme {
 
 		// UI Chrome
 		Title:        lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")),
-		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")),
-		ActiveBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("205")),
+		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0),
+		ActiveBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("205")).Padding(0),
 		Selected:     lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Background(lipgloss.Color("57")),
 		Normal:       lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
 		Dim:          lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
@@ -54,8 +54,8 @@ func Light() *Theme {
 
 		// UI Chrome
 		Title:        lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("91")),
-		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("250")),
-		ActiveBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("91")),
+		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("250")).Padding(0),
+		ActiveBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("91")).Padding(0),
 		Selected:     lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(lipgloss.Color("25")),
 		Normal:       lipgloss.NewStyle().Foreground(lipgloss.Color("235")),
 		Dim:          lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
@@ -98,8 +98,8 @@ func Dracula() *Theme {
 
 		// UI Chrome - Dracula palette
 		Title:        lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ff79c6")),
-		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#6272a4")),
-		ActiveBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#bd93f9")),
+		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#6272a4")).Padding(0),
+		ActiveBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#bd93f9")).Padding(0),
 		Selected:     lipgloss.NewStyle().Foreground(lipgloss.Color("#f8f8f2")).Background(lipgloss.Color("#44475a")),
 		Normal:       lipgloss.NewStyle().Foreground(lipgloss.Color("#f8f8f2")),
 		Dim:          lipgloss.NewStyle().Foreground(lipgloss.Color("#6272a4")),
@@ -142,8 +142,8 @@ func Monokai() *Theme {
 
 		// UI Chrome
 		Title:        lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#f92672")),
-		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#75715e")),
-		ActiveBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#a6e22e")),
+		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#75715e")).Padding(0),
+		ActiveBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#a6e22e")).Padding(0),
 		Selected:     lipgloss.NewStyle().Foreground(lipgloss.Color("#f8f8f2")).Background(lipgloss.Color("#49483e")),
 		Normal:       lipgloss.NewStyle().Foreground(lipgloss.Color("#f8f8f2")),
 		Dim:          lipgloss.NewStyle().Foreground(lipgloss.Color("#75715e")),
@@ -186,8 +186,8 @@ func Gruvbox() *Theme {
 
 		// UI Chrome - Gruvbox palette
 		Title:        lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#fe8019")),
-		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#665c54")),
-		ActiveBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#fabd2f")),
+		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#665c54")).Padding(0),
+		ActiveBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#fabd2f")).Padding(0),
 		Selected:     lipgloss.NewStyle().Foreground(lipgloss.Color("#ebdbb2")).Background(lipgloss.Color("#504945")),
 		Normal:       lipgloss.NewStyle().Foreground(lipgloss.Color("#ebdbb2")),
 		Dim:          lipgloss.NewStyle().Foreground(lipgloss.Color("#928374")),
@@ -230,8 +230,8 @@ func Nord() *Theme {
 
 		// UI Chrome - Nord palette
 		Title:        lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#88c0d0")),
-		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#4c566a")),
-		ActiveBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#88c0d0")),
+		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#4c566a")).Padding(0),
+		ActiveBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#88c0d0")).Padding(0),
 		Selected:     lipgloss.NewStyle().Foreground(lipgloss.Color("#eceff4")).Background(lipgloss.Color("#434c5e")),
 		Normal:       lipgloss.NewStyle().Foreground(lipgloss.Color("#eceff4")),
 		Dim:          lipgloss.NewStyle().Foreground(lipgloss.Color("#4c566a")),
@@ -273,12 +273,12 @@ func Catppuccin() *Theme {
 		ChromaStyle: "catppuccin-mocha",
 
 		// UI Chrome - Catppuccin Mocha palette
-		Title:        lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#cba6f7")),                             // Mauve
-		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#585b70")), // Surface2
-		ActiveBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#89b4fa")), // Blue
-		Selected:     lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")).Background(lipgloss.Color("#45475a")),  // Text on Surface1
-		Normal:       lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")),                                        // Text
-		Dim:          lipgloss.NewStyle().Foreground(lipgloss.Color("#6c7086")),                                        // Overlay1
+		Title:        lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#cba6f7")),                                        // Mauve
+		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#585b70")).Padding(0), // Surface2
+		ActiveBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#89b4fa")).Padding(0), // Blue
+		Selected:     lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")).Background(lipgloss.Color("#45475a")),             // Text on Surface1
+		Normal:       lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")),                                                   // Text
+		Dim:          lipgloss.NewStyle().Foreground(lipgloss.Color("#6c7086")),                                                   // Overlay1
 		Status:       lipgloss.NewStyle().Foreground(lipgloss.Color("#6c7086")),
 		Help:         lipgloss.NewStyle().Foreground(lipgloss.Color("#6c7086")),
 
