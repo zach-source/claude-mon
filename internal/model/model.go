@@ -1963,14 +1963,53 @@ func (m Model) View() string {
 		minimapWidth = 2
 	}
 
-	// Calculate pane widths based on left pane visibility
+	// Get left pane content first to calculate its width
+	var leftContent string
+	var leftBox lipgloss.Style
+	if !m.hideLeftPane && m.leftPaneMode != LeftPaneModeRalph {
+		// Both panes visible - get left content
+		switch m.leftPaneMode {
+		case LeftPaneModePrompts:
+			leftContent = m.renderPromptsList()
+		case LeftPaneModeRalph:
+			leftContent = m.renderRalphStatus()
+		case LeftPaneModePlan:
+			leftContent = m.renderPlanList()
+		case LeftPaneModeContext:
+			leftContent = m.renderContextList()
+		default:
+			leftContent = m.renderHistory()
+		}
+
+		leftBox = m.theme.Border
+		if m.activePane == PaneLeft {
+			leftBox = m.theme.ActiveBorder
+		}
+	}
+
+	// Calculate pane widths based on left pane content
 	var leftWidth, rightWidth int
-	// Automatically hide left pane in Ralph mode for full-width view
 	if m.hideLeftPane || m.leftPaneMode == LeftPaneModeRalph {
+		// Left pane hidden or in Ralph mode (full-width right pane)
 		leftWidth = 0
 		rightWidth = m.width - 2 - minimapWidth
 	} else {
-		leftWidth = m.width / 3
+		// Calculate content width with flexbox-like auto-sizing
+		contentWidth := lipgloss.Width(leftContent)
+
+		// Apply min/max constraints
+		minWidth := 25 // Minimum width for left pane
+		maxWidth := m.width / 2
+
+		if contentWidth < minWidth {
+			leftWidth = minWidth
+		} else if contentWidth > maxWidth {
+			leftWidth = maxWidth
+		} else {
+			leftWidth = contentWidth
+		}
+
+		// Right pane gets remaining space
 		rightWidth = m.width - leftWidth - 3 - minimapWidth
 	}
 
@@ -1994,25 +2033,7 @@ func (m Model) View() string {
 			content = rightPane
 		}
 	} else {
-		// Both panes visible
-		var leftContent string
-		switch m.leftPaneMode {
-		case LeftPaneModePrompts:
-			leftContent = m.renderPromptsList()
-		case LeftPaneModeRalph:
-			leftContent = m.renderRalphStatus()
-		case LeftPaneModePlan:
-			leftContent = m.renderPlanList()
-		case LeftPaneModeContext:
-			leftContent = m.renderContextList()
-		default:
-			leftContent = m.renderHistory()
-		}
-
-		leftBox := m.theme.Border
-		if m.activePane == PaneLeft {
-			leftBox = m.theme.ActiveBorder
-		}
+		// Both panes visible - render left pane with calculated width
 		leftPane := leftBox.
 			Width(leftWidth).
 			Height(m.height - 4).
