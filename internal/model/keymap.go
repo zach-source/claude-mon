@@ -47,6 +47,8 @@ type KeyMap struct {
 	CreateVersion   key.Binding
 	ViewVersions    key.Binding
 	RevertVersion   key.Binding
+	FilterPrompts   key.Binding // fzf fuzzy filter
+	FilterScope     key.Binding // cycle all/project/global
 
 	// Ralph mode
 	CancelRalph key.Binding
@@ -109,6 +111,8 @@ func NewKeyMap() KeyMap {
 		CreateVersion:   key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "version")),
 		ViewVersions:    key.NewBinding(key.WithKeys("V"), key.WithHelp("V", "view versions")),
 		RevertVersion:   key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "revert")),
+		FilterPrompts:   key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "fzf filter")),
+		FilterScope:     key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "scope")),
 
 		// Ralph mode
 		CancelRalph: key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "cancel ralph")),
@@ -313,6 +317,7 @@ func (k KeyMap) PromptsHelp() [][]key.Binding {
 		{k.NewPrompt, k.NewGlobalPrompt, k.DeletePrompt},
 		{k.RefinePrompt, k.YankPrompt, k.InjectMethod},
 		{k.CreateVersion, k.ViewVersions, k.RevertVersion},
+		{k.FilterPrompts, k.FilterScope},
 	}
 }
 

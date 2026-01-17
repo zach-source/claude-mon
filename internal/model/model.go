@@ -103,6 +103,15 @@ const (
 	LeftPaneModeContext
 )
 
+// PromptFilter defines the scope filter for prompts
+type PromptFilter int
+
+const (
+	PromptFilterAll     PromptFilter = iota // Show all prompts
+	PromptFilterProject                     // Show only project prompts
+	PromptFilterGlobal                      // Show only global prompts
+)
+
 // Model is the Bubbletea model
 type Model struct {
 	socketPath       string
@@ -133,8 +142,10 @@ type Model struct {
 
 	// Prompt manager (integrated in left pane)
 	promptStore          *prompt.Store          // Prompt storage
-	promptList           []prompt.Prompt        // Cached list of prompts
+	promptList           []prompt.Prompt        // Cached list of prompts (all prompts)
+	promptFilteredList   []prompt.Prompt        // Filtered list based on scope
 	promptSelected       int                    // Selected prompt index
+	promptFilter         PromptFilter           // Current filter scope (all/project/global)
 	promptRefining       bool                   // Whether we're in refine mode
 	promptRefineInput    textinput.Model        // Refinement request input
 	promptRefiningPrompt *prompt.Prompt         // Prompt being refined
@@ -1127,6 +1138,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addToast("Refining with Claude...", ToastInfo)
 		return m, m.executePromptRefinement(msg.request)
 
+	case fzfPromptFilterMsg:
+		// fzf selection completed
+		if msg.err != nil {
+			// User cancelled - no error toast needed
+			logger.Log("fzf prompt filter cancelled or error: %v", msg.err)
+			return m, nil
+		}
+		if msg.selectedName != "" {
+			// Parse the index from the selection (format: "N:[P/G] Name")
+			parts := strings.SplitN(msg.selectedName, ":", 2)
+			if len(parts) == 2 {
+				var idx int
+				if _, err := fmt.Sscanf(parts[0], "%d", &idx); err == nil {
+					if idx >= 0 && idx < len(m.promptFilteredList) {
+						m.promptSelected = idx
+						m.diffViewport.SetContent(m.renderRightPane())
+						logger.Log("fzf selected prompt at index %d", idx)
+					}
+				}
+			}
+		}
+
 	case planGeneratedMsg:
 		logger.Log("Plan generated: %s", msg.path)
 		m.planGenerating = false
@@ -1413,7 +1446,7 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Normal prompt list mode
 	switch key {
 	case m.config.Keys.Down, "down":
-		if m.activePane == PaneLeft && m.promptSelected < len(m.promptList)-1 {
+		if m.activePane == PaneLeft && m.promptSelected < len(m.promptFilteredList)-1 {
 			m.promptSelected++
 			m.diffViewport.SetContent(m.renderRightPane())
 		} else if m.activePane == PaneRight {
@@ -1434,20 +1467,20 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.createNewPrompt(true)
 	case m.config.Keys.EditPrompt:
 		// Edit selected prompt
-		if len(m.promptList) > 0 {
-			return m.editPrompt(m.promptList[m.promptSelected])
+		if len(m.promptFilteredList) > 0 {
+			return m.editPrompt(m.promptFilteredList[m.promptSelected])
 		}
 	case m.config.Keys.RefinePrompt:
 		// Refine prompt with Claude
-		if len(m.promptList) > 0 && !m.promptRefining {
+		if len(m.promptFilteredList) > 0 && !m.promptRefining {
 			m.addToast("Refining with Claude...", ToastInfo)
-			return m.refinePrompt(m.promptList[m.promptSelected])
+			return m.refinePrompt(m.promptFilteredList[m.promptSelected])
 		}
 	case m.config.Keys.CreateVersion:
 		// Create version backup
-		logger.Log("Version key pressed: promptList=%d, promptStore=%v", len(m.promptList), m.promptStore != nil)
-		if len(m.promptList) > 0 && m.promptStore != nil {
-			p := m.promptList[m.promptSelected]
+		logger.Log("Version key pressed: promptFilteredList=%d, promptStore=%v", len(m.promptFilteredList), m.promptStore != nil)
+		if len(m.promptFilteredList) > 0 && m.promptStore != nil {
+			p := m.promptFilteredList[m.promptSelected]
 			logger.Log("Creating version for: %s (path=%s)", p.Name, p.Path)
 			if err := m.promptStore.CreateVersion(&p); err != nil {
 				logger.Log("CreateVersion error: %v", err)
@@ -1463,7 +1496,7 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case m.config.Keys.ViewVersions, "shift+v":
 		// Enter version view mode
-		if len(m.promptList) > 0 && m.promptStore != nil {
+		if len(m.promptFilteredList) > 0 && m.promptStore != nil {
 			m.loadVersionList()
 			if len(m.promptVersions) > 0 {
 				m.promptShowVersions = true
@@ -1475,23 +1508,20 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case m.config.Keys.DeletePrompt:
 		// Delete prompt
-		if len(m.promptList) > 0 && m.promptStore != nil {
-			p := m.promptList[m.promptSelected]
+		if len(m.promptFilteredList) > 0 && m.promptStore != nil {
+			p := m.promptFilteredList[m.promptSelected]
 			if err := m.promptStore.Delete(p.Path); err != nil {
 				m.addToast(err.Error(), ToastError)
 			} else {
 				m.addToast("Deleted "+p.Name, ToastSuccess)
 				m.refreshPromptList()
-				if m.promptSelected >= len(m.promptList) && m.promptSelected > 0 {
-					m.promptSelected--
-				}
 				m.diffViewport.SetContent(m.renderRightPane())
 			}
 		}
 	case m.config.Keys.SendPrompt:
 		// Inject prompt using current method
-		if len(m.promptList) > 0 {
-			p := m.promptList[m.promptSelected]
+		if len(m.promptFilteredList) > 0 {
+			p := m.promptFilteredList[m.promptSelected]
 			expanded := m.expandPromptVariables(p.Content)
 			logger.Log("Injecting prompt: original=%d bytes, expanded=%d bytes", len(p.Content), len(expanded))
 			if err := prompt.Inject(expanded, m.promptInjectMethod); err != nil {
@@ -1502,8 +1532,8 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case m.config.Keys.YankPrompt:
 		// Yank/copy to clipboard only
-		if len(m.promptList) > 0 {
-			p := m.promptList[m.promptSelected]
+		if len(m.promptFilteredList) > 0 {
+			p := m.promptFilteredList[m.promptSelected]
 			expanded := m.expandPromptVariables(p.Content)
 			if err := prompt.Inject(expanded, prompt.InjectClipboard); err != nil {
 				m.addToast(err.Error(), ToastError)
@@ -1515,6 +1545,24 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Cycle injection method
 		m.promptInjectMethod = (m.promptInjectMethod + 1) % 2
 		m.addToast(fmt.Sprintf("Inject method: %s", prompt.MethodName(m.promptInjectMethod)), ToastInfo)
+	case "/":
+		// Cycle filter scope: all -> project -> global -> all
+		m.promptFilter = (m.promptFilter + 1) % 3
+		m.applyPromptFilter()
+		var scopeName string
+		switch m.promptFilter {
+		case PromptFilterAll:
+			scopeName = "All"
+		case PromptFilterProject:
+			scopeName = "Project"
+		case PromptFilterGlobal:
+			scopeName = "Global"
+		}
+		m.addToast(fmt.Sprintf("Filter: %s", scopeName), ToastInfo)
+		m.diffViewport.SetContent(m.renderRightPane())
+	case "f":
+		// Launch fzf to filter prompts
+		return m.launchFzfPromptFilter()
 	}
 	return m, nil
 }
@@ -2882,13 +2930,26 @@ func (m Model) renderPromptsList() string {
 		}
 	} else {
 		// Normal prompt list mode
-		sb.WriteString(m.theme.Title.Render(fmt.Sprintf("Prompts (%d)", len(m.promptList))) + "\n")
+		// Build header with filter scope indicator
+		filterIndicator := ""
+		switch m.promptFilter {
+		case PromptFilterProject:
+			filterIndicator = " [Project]"
+		case PromptFilterGlobal:
+			filterIndicator = " [Global]"
+		}
+		header := fmt.Sprintf("Prompts (%d)%s", len(m.promptFilteredList), filterIndicator)
+		sb.WriteString(m.theme.Title.Render(header) + "\n")
 		sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", listWidth-4)) + "\n")
 
-		if len(m.promptList) == 0 {
-			sb.WriteString(m.theme.Dim.Render("No prompts\nPress 'n' to create"))
+		if len(m.promptFilteredList) == 0 {
+			if m.promptFilter != PromptFilterAll {
+				sb.WriteString(m.theme.Dim.Render("No matching prompts\nPress '/' to change filter"))
+			} else {
+				sb.WriteString(m.theme.Dim.Render("No prompts\nPress 'n' to create"))
+			}
 		} else {
-			for i, p := range m.promptList {
+			for i, p := range m.promptFilteredList {
 				prefix := "  "
 				if i == m.promptSelected {
 					prefix = "> "
@@ -4119,9 +4180,105 @@ func (m *Model) refreshPromptList() {
 		return
 	}
 	m.promptList = prompts
-	if m.promptSelected >= len(m.promptList) {
-		m.promptSelected = 0
+	m.applyPromptFilter()
+}
+
+// applyPromptFilter filters the prompt list based on current filter scope
+func (m *Model) applyPromptFilter() {
+	if m.promptFilter == PromptFilterAll {
+		m.promptFilteredList = m.promptList
+	} else {
+		m.promptFilteredList = make([]prompt.Prompt, 0)
+		for _, p := range m.promptList {
+			switch m.promptFilter {
+			case PromptFilterProject:
+				if !p.IsGlobal {
+					m.promptFilteredList = append(m.promptFilteredList, p)
+				}
+			case PromptFilterGlobal:
+				if p.IsGlobal {
+					m.promptFilteredList = append(m.promptFilteredList, p)
+				}
+			}
+		}
 	}
+	// Adjust selection if needed
+	if m.promptSelected >= len(m.promptFilteredList) {
+		if len(m.promptFilteredList) > 0 {
+			m.promptSelected = len(m.promptFilteredList) - 1
+		} else {
+			m.promptSelected = 0
+		}
+	}
+}
+
+// launchFzfPromptFilter launches fzf to filter prompts by name
+func (m Model) launchFzfPromptFilter() (Model, tea.Cmd) {
+	if len(m.promptFilteredList) == 0 {
+		m.addToast("No prompts to filter", ToastWarning)
+		return m, nil
+	}
+
+	// Build list of prompt names for fzf (with index prefix for easy lookup)
+	var names []string
+	for i, p := range m.promptFilteredList {
+		scope := "[P]"
+		if p.IsGlobal {
+			scope = "[G]"
+		}
+		// Include index prefix for reliable lookup
+		names = append(names, fmt.Sprintf("%d:%s %s", i, scope, p.Name))
+	}
+	input := strings.Join(names, "\n")
+
+	// Create temp files for input and output
+	inputFile, err := os.CreateTemp("", "fzf-input-*.txt")
+	if err != nil {
+		m.addToast("Failed to create temp file", ToastError)
+		return m, nil
+	}
+	outputFile, err := os.CreateTemp("", "fzf-output-*.txt")
+	if err != nil {
+		os.Remove(inputFile.Name())
+		m.addToast("Failed to create temp file", ToastError)
+		return m, nil
+	}
+
+	// Write input to temp file
+	inputFile.WriteString(input)
+	inputFile.Close()
+	outputFile.Close()
+
+	inputPath := inputFile.Name()
+	outputPath := outputFile.Name()
+
+	// Create shell command that runs fzf with input/output redirection
+	shellCmd := fmt.Sprintf("cat %s | fzf --reverse --prompt='Filter: ' > %s", inputPath, outputPath)
+	cmd := exec.Command("sh", "-c", shellCmd)
+
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		defer os.Remove(inputPath)
+		defer os.Remove(outputPath)
+
+		if err != nil {
+			// User cancelled (exit code 130) or fzf error - not necessarily an error
+			// Check if output file has content
+			data, readErr := os.ReadFile(outputPath)
+			if readErr != nil || len(data) == 0 {
+				return fzfPromptFilterMsg{err: fmt.Errorf("cancelled")}
+			}
+			return fzfPromptFilterMsg{selectedName: strings.TrimSpace(string(data))}
+		}
+
+		// Read the selected prompt from output file
+		data, readErr := os.ReadFile(outputPath)
+		if readErr != nil {
+			return fzfPromptFilterMsg{err: readErr}
+		}
+
+		selected := strings.TrimSpace(string(data))
+		return fzfPromptFilterMsg{selectedName: selected}
+	})
 }
 
 // createNewPrompt creates a new prompt file and opens it in nvim

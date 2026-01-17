@@ -95,3 +95,9 @@ type daemonStatusMsg struct {
 type daemonStatusTickMsg struct {
 	time.Time
 }
+
+// fzfPromptFilterMsg is sent when fzf finishes prompt filtering
+type fzfPromptFilterMsg struct {
+	selectedName string
+	err          error
+}
