@@ -146,6 +146,10 @@ type Model struct {
 	promptFilteredList   []prompt.Prompt        // Filtered list based on scope
 	promptSelected       int                    // Selected prompt index
 	promptFilter         PromptFilter           // Current filter scope (all/project/global)
+	promptFuzzyActive    bool                   // Whether fuzzy filter overlay is active
+	promptFuzzyInput     textinput.Model        // Fuzzy search input
+	promptFuzzyMatches   []int                  // Indices of matching prompts
+	promptFuzzySelected  int                    // Selected match in fuzzy results
 	promptRefining       bool                   // Whether we're in refine mode
 	promptRefineInput    textinput.Model        // Refinement request input
 	promptRefiningPrompt *prompt.Prompt         // Prompt being refined
@@ -335,6 +339,13 @@ func New(socketPath string, opts ...Option) Model {
 	refineTi.CharLimit = 500
 	refineTi.Width = 60
 	m.promptRefineInput = refineTi
+
+	// Initialize fuzzy filter input
+	fuzzyTi := textinput.New()
+	fuzzyTi.Placeholder = "Type to filter..."
+	fuzzyTi.CharLimit = 100
+	fuzzyTi.Width = 40
+	m.promptFuzzyInput = fuzzyTi
 
 	// Initialize context
 	if ctx, err := workingctx.Load(); err == nil {
@@ -1138,28 +1149,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addToast("Refining with Claude...", ToastInfo)
 		return m, m.executePromptRefinement(msg.request)
 
-	case fzfPromptFilterMsg:
-		// fzf selection completed
-		if msg.err != nil {
-			// User cancelled - no error toast needed
-			logger.Log("fzf prompt filter cancelled or error: %v", msg.err)
-			return m, nil
-		}
-		if msg.selectedName != "" {
-			// Parse the index from the selection (format: "N:[P/G] Name")
-			parts := strings.SplitN(msg.selectedName, ":", 2)
-			if len(parts) == 2 {
-				var idx int
-				if _, err := fmt.Sscanf(parts[0], "%d", &idx); err == nil {
-					if idx >= 0 && idx < len(m.promptFilteredList) {
-						m.promptSelected = idx
-						m.diffViewport.SetContent(m.renderRightPane())
-						logger.Log("fzf selected prompt at index %d", idx)
-					}
-				}
-			}
-		}
-
 	case planGeneratedMsg:
 		logger.Log("Plan generated: %s", msg.path)
 		m.planGenerating = false
@@ -1380,6 +1369,51 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
+	// Fuzzy filter mode has different key bindings
+	if m.promptFuzzyActive {
+		switch key {
+		case "esc":
+			// Cancel fuzzy filter
+			m.promptFuzzyActive = false
+			m.promptFuzzyInput.Reset()
+			m.promptFuzzyInput.Blur()
+			return m, nil
+		case "enter":
+			// Select the fuzzy match
+			if len(m.promptFuzzyMatches) > 0 && m.promptFuzzySelected < len(m.promptFuzzyMatches) {
+				m.promptSelected = m.promptFuzzyMatches[m.promptFuzzySelected]
+				m.promptFuzzyActive = false
+				m.promptFuzzyInput.Reset()
+				m.promptFuzzyInput.Blur()
+				m.diffViewport.SetContent(m.renderRightPane())
+			}
+			return m, nil
+		case "up", "ctrl+p":
+			// Navigate up in fuzzy matches
+			if m.promptFuzzySelected > 0 {
+				m.promptFuzzySelected--
+			}
+			return m, nil
+		case "down", "ctrl+n":
+			// Navigate down in fuzzy matches
+			if m.promptFuzzySelected < len(m.promptFuzzyMatches)-1 {
+				m.promptFuzzySelected++
+			}
+			return m, nil
+		default:
+			// Pass to text input for typing
+			var cmd tea.Cmd
+			m.promptFuzzyInput, cmd = m.promptFuzzyInput.Update(msg)
+			// Recompute matches on every keystroke
+			m.promptFuzzyMatches = m.computeFuzzyMatches(m.promptFuzzyInput.Value())
+			// Reset selection if it's out of bounds
+			if m.promptFuzzySelected >= len(m.promptFuzzyMatches) {
+				m.promptFuzzySelected = 0
+			}
+			return m, cmd
+		}
+	}
+
 	// Version view mode has different key bindings
 	if m.promptShowVersions {
 		switch key {
@@ -1561,8 +1595,14 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.addToast(fmt.Sprintf("Filter: %s", scopeName), ToastInfo)
 		m.diffViewport.SetContent(m.renderRightPane())
 	case "f":
-		// Launch fzf to filter prompts
-		return m.launchFzfPromptFilter()
+		// Activate fuzzy filter overlay
+		if len(m.promptFilteredList) > 0 {
+			m.promptFuzzyActive = true
+			m.promptFuzzyInput.Reset()
+			m.promptFuzzyInput.Focus()
+			m.promptFuzzyMatches = m.computeFuzzyMatches("")
+			m.promptFuzzySelected = 0
+		}
 	}
 	return m, nil
 }
@@ -2902,6 +2942,53 @@ func (m Model) renderPromptsList() string {
 		return sb.String()
 	}
 
+	// Show fuzzy filter overlay when active
+	if m.promptFuzzyActive {
+		sb.WriteString(m.theme.Title.Render("Filter Prompts") + "\n")
+		sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", listWidth-4)) + "\n\n")
+
+		// Search input
+		sb.WriteString(m.promptFuzzyInput.View() + "\n\n")
+
+		// Show matching prompts
+		if len(m.promptFuzzyMatches) == 0 {
+			sb.WriteString(m.theme.Dim.Render("No matches"))
+		} else {
+			// Show up to 10 matches
+			maxShow := 10
+			if len(m.promptFuzzyMatches) < maxShow {
+				maxShow = len(m.promptFuzzyMatches)
+			}
+			for i := 0; i < maxShow; i++ {
+				idx := m.promptFuzzyMatches[i]
+				p := m.promptFilteredList[idx]
+				prefix := "  "
+				if i == m.promptFuzzySelected {
+					prefix = "> "
+				}
+				scope := "[P]"
+				if p.IsGlobal {
+					scope = "[G]"
+				}
+				line := fmt.Sprintf("%s%s %s", prefix, scope, p.Name)
+				if len(line) > listWidth-4 {
+					line = line[:listWidth-7] + "..."
+				}
+				if i == m.promptFuzzySelected {
+					sb.WriteString(m.theme.Selected.Render(line) + "\n")
+				} else {
+					sb.WriteString(m.theme.Normal.Render(line) + "\n")
+				}
+			}
+			if len(m.promptFuzzyMatches) > maxShow {
+				sb.WriteString(m.theme.Dim.Render(fmt.Sprintf("  ...and %d more", len(m.promptFuzzyMatches)-maxShow)) + "\n")
+			}
+		}
+
+		sb.WriteString("\n" + m.theme.Dim.Render("Enter:select  Esc:cancel  ↑/↓:navigate"))
+		return sb.String()
+	}
+
 	if m.promptShowVersions {
 		// Version view mode
 		sb.WriteString(m.theme.Title.Render("Versions") + "\n")
@@ -4212,73 +4299,28 @@ func (m *Model) applyPromptFilter() {
 	}
 }
 
-// launchFzfPromptFilter launches fzf to filter prompts by name
-func (m Model) launchFzfPromptFilter() (Model, tea.Cmd) {
-	if len(m.promptFilteredList) == 0 {
-		m.addToast("No prompts to filter", ToastWarning)
-		return m, nil
+// computeFuzzyMatches returns indices of prompts matching the query
+func (m *Model) computeFuzzyMatches(query string) []int {
+	if query == "" {
+		// Empty query matches all
+		matches := make([]int, len(m.promptFilteredList))
+		for i := range m.promptFilteredList {
+			matches[i] = i
+		}
+		return matches
 	}
 
-	// Build list of prompt names for fzf (with index prefix for easy lookup)
-	var names []string
+	query = strings.ToLower(query)
+	var matches []int
 	for i, p := range m.promptFilteredList {
-		scope := "[P]"
-		if p.IsGlobal {
-			scope = "[G]"
+		name := strings.ToLower(p.Name)
+		desc := strings.ToLower(p.Description)
+		// Simple substring match (fuzzy-ish)
+		if strings.Contains(name, query) || strings.Contains(desc, query) {
+			matches = append(matches, i)
 		}
-		// Include index prefix for reliable lookup
-		names = append(names, fmt.Sprintf("%d:%s %s", i, scope, p.Name))
 	}
-	input := strings.Join(names, "\n")
-
-	// Create temp files for input and output
-	inputFile, err := os.CreateTemp("", "fzf-input-*.txt")
-	if err != nil {
-		m.addToast("Failed to create temp file", ToastError)
-		return m, nil
-	}
-	outputFile, err := os.CreateTemp("", "fzf-output-*.txt")
-	if err != nil {
-		os.Remove(inputFile.Name())
-		m.addToast("Failed to create temp file", ToastError)
-		return m, nil
-	}
-
-	// Write input to temp file
-	inputFile.WriteString(input)
-	inputFile.Close()
-	outputFile.Close()
-
-	inputPath := inputFile.Name()
-	outputPath := outputFile.Name()
-
-	// Create shell command that runs fzf with input/output redirection
-	shellCmd := fmt.Sprintf("cat %s | fzf --reverse --prompt='Filter: ' > %s", inputPath, outputPath)
-	cmd := exec.Command("sh", "-c", shellCmd)
-
-	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-		defer os.Remove(inputPath)
-		defer os.Remove(outputPath)
-
-		if err != nil {
-			// User cancelled (exit code 130) or fzf error - not necessarily an error
-			// Check if output file has content
-			data, readErr := os.ReadFile(outputPath)
-			if readErr != nil || len(data) == 0 {
-				return fzfPromptFilterMsg{err: fmt.Errorf("cancelled")}
-			}
-			return fzfPromptFilterMsg{selectedName: strings.TrimSpace(string(data))}
-		}
-
-		// Read the selected prompt from output file
-		data, readErr := os.ReadFile(outputPath)
-		if readErr != nil {
-			return fzfPromptFilterMsg{err: readErr}
-		}
-
-		selected := strings.TrimSpace(string(data))
-		return fzfPromptFilterMsg{selectedName: selected}
-	})
+	return matches
 }
 
 // createNewPrompt creates a new prompt file and opens it in nvim
