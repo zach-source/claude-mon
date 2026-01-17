@@ -8,6 +8,34 @@ import (
 	"github.com/charmbracelet/lipgloss/table"
 )
 
+// wrapText wraps text at the given width, breaking on path separators when possible
+func wrapText(text string, width int) []string {
+	if len(text) <= width {
+		return []string{text}
+	}
+
+	var lines []string
+	remaining := text
+
+	for len(remaining) > width {
+		// Find a good break point (prefer / for paths)
+		breakAt := width
+		for i := width - 1; i > width/2; i-- {
+			if remaining[i] == '/' {
+				breakAt = i + 1
+				break
+			}
+		}
+		lines = append(lines, remaining[:breakAt])
+		remaining = remaining[breakAt:]
+	}
+	if len(remaining) > 0 {
+		lines = append(lines, remaining)
+	}
+
+	return lines
+}
+
 // View renders the context display
 func (m Model) View() string {
 	if m.editMode {
@@ -33,9 +61,18 @@ func (m Model) renderCurrentContext() string {
 		return sb.String()
 	}
 
-	// Project info
-	sb.WriteString(m.theme.Selected.Render("📁 Project:") + " ")
-	sb.WriteString(m.theme.Normal.Render(m.current.ProjectRoot) + "\n\n")
+	// Project info - wrap long paths across multiple lines
+	sb.WriteString(m.theme.Selected.Render("📁 Location:") + "\n")
+	// Wrap the path with a reasonable width
+	pathWidth := m.width - 4
+	if pathWidth < 40 {
+		pathWidth = 40
+	}
+	wrappedPath := wrapText(m.current.ProjectRoot, pathWidth)
+	for _, line := range wrappedPath {
+		sb.WriteString("   " + m.theme.Normal.Render(line) + "\n")
+	}
+	sb.WriteString("\n")
 
 	// Build table rows for context details
 	var rows [][]string
@@ -206,6 +243,13 @@ func (m Model) renderEditView() string {
 
 	sb.WriteString(m.theme.Dim.Render("Field: ") + m.theme.Normal.Render(string(m.editField)) + "\n\n")
 	sb.WriteString(m.editInput.View() + "\n\n")
+
+	// Show format hint for key=value fields
+	if m.editField == EditEnvVar || m.editField == EditCustom {
+		sb.WriteString(m.theme.Dim.Render("Format: KEY=value or KEY=\"sentence with spaces\"") + "\n")
+		sb.WriteString(m.theme.Dim.Render("        Quotes: \" ' or ` for multi-word values") + "\n\n")
+	}
+
 	sb.WriteString(m.theme.Dim.Render("Enter:save  Esc:cancel"))
 
 	return sb.String()

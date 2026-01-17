@@ -60,6 +60,7 @@ const (
 	EditAWSRegion  EditField = "aws.region"
 	EditGitBranch  EditField = "git.branch"
 	EditEnvVar     EditField = "env"
+	EditCustom     EditField = "custom"
 )
 
 // Model represents the context component state
@@ -214,6 +215,48 @@ func (m Model) handleEditKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
+// parseKeyValue parses a KEY=VALUE string where VALUE can be quoted with ", ', or `
+// Examples:
+//   - "foo=bar" -> ("foo", "bar")
+//   - "foo='hello world'" -> ("foo", "hello world")
+//   - `foo="my sentence"` -> ("foo", "my sentence")
+//   - "foo=`backtick quoted`" -> ("foo", "backtick quoted")
+func parseKeyValue(input string) (key, value string, ok bool) {
+	// Find the first = sign
+	eqIdx := -1
+	for i, c := range input {
+		if c == '=' {
+			eqIdx = i
+			break
+		}
+	}
+
+	if eqIdx <= 0 {
+		return "", "", false
+	}
+
+	key = input[:eqIdx]
+	remainder := input[eqIdx+1:]
+
+	// Check if value is quoted
+	if len(remainder) >= 2 {
+		first := remainder[0]
+		if first == '"' || first == '\'' || first == '`' {
+			// Find matching closing quote
+			for i := len(remainder) - 1; i > 0; i-- {
+				if remainder[i] == first {
+					value = remainder[1:i]
+					return key, value, true
+				}
+			}
+		}
+	}
+
+	// Not quoted, use the whole remainder
+	value = remainder
+	return key, value, true
+}
+
 // saveEdit saves the current edit to the context
 func (m *Model) saveEdit() {
 	if m.current == nil {
@@ -242,6 +285,26 @@ func (m *Model) saveEdit() {
 	case EditGitBranch:
 		if git := m.current.GetGit(); git != nil {
 			git.Branch = value
+		}
+	case EditEnvVar:
+		// Parse KEY=VALUE with quote support and merge into existing env
+		if k, v, ok := parseKeyValue(value); ok {
+			env := m.current.GetEnv()
+			if env == nil {
+				env = make(map[string]string)
+			}
+			env[k] = v
+			m.current.SetEnv(env)
+		}
+	case EditCustom:
+		// Parse KEY=VALUE with quote support and merge into existing custom
+		if k, v, ok := parseKeyValue(value); ok {
+			custom := m.current.GetCustom()
+			if custom == nil {
+				custom = make(map[string]string)
+			}
+			custom[k] = v
+			m.current.SetCustom(custom)
 		}
 	}
 
