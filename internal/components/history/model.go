@@ -85,11 +85,12 @@ type Model struct {
 	selectedIndex int
 
 	// Display state
-	viewport    viewport.Model
-	scrollX     int // Horizontal scroll offset
-	totalLines  int // Total lines in current file (for minimap)
-	minimapData *minimap.Minimap
-	diffCache   map[int]string // Cached rendered diffs by index
+	viewport         viewport.Model
+	scrollX          int // Horizontal scroll offset for selected item path
+	listScrollOffset int // Vertical scroll offset for history list
+	totalLines       int // Total lines in current file (for minimap)
+	minimapData      *minimap.Minimap
+	diffCache        map[int]string // Cached rendered diffs by index
 
 	// Storage
 	store      *history.Store
@@ -212,6 +213,7 @@ func (m Model) handleKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 			if len(m.changes) > 0 && m.selectedIndex > 0 {
 				m.selectedIndex--
 				m.scrollX = 0
+				m.ensureSelectedVisible()
 				m.viewport.SetContent(m.RenderDiff())
 				m.scrollToChange()
 				m.preloadAdjacent()
@@ -226,6 +228,7 @@ func (m Model) handleKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 			if len(m.changes) > 0 && m.selectedIndex < len(m.changes)-1 {
 				m.selectedIndex++
 				m.scrollX = 0
+				m.ensureSelectedVisible()
 				m.viewport.SetContent(m.RenderDiff())
 				m.scrollToChange()
 				m.preloadAdjacent()
@@ -234,11 +237,44 @@ func (m Model) handleKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.viewport.LineUp(1)
 		}
 
+	case key.Matches(msg, m.keyMap.PageDown):
+		if m.focusLeft {
+			// Page down in history list
+			visibleItems := m.listVisibleItems()
+			for i := 0; i < visibleItems && m.selectedIndex > 0; i++ {
+				m.selectedIndex--
+			}
+			m.scrollX = 0
+			m.ensureSelectedVisible()
+			m.viewport.SetContent(m.RenderDiff())
+			m.scrollToChange()
+			m.preloadAdjacent()
+		} else {
+			m.viewport.ViewDown()
+		}
+
+	case key.Matches(msg, m.keyMap.PageUp):
+		if m.focusLeft {
+			// Page up in history list
+			visibleItems := m.listVisibleItems()
+			for i := 0; i < visibleItems && m.selectedIndex < len(m.changes)-1; i++ {
+				m.selectedIndex++
+			}
+			m.scrollX = 0
+			m.ensureSelectedVisible()
+			m.viewport.SetContent(m.RenderDiff())
+			m.scrollToChange()
+			m.preloadAdjacent()
+		} else {
+			m.viewport.ViewUp()
+		}
+
 	case key.Matches(msg, m.keyMap.Next):
 		// Next change in queue
 		if len(m.changes) > 0 && m.selectedIndex < len(m.changes)-1 {
 			m.selectedIndex++
 			m.scrollX = 0
+			m.ensureSelectedVisible()
 			m.viewport.SetContent(m.RenderDiff())
 			m.scrollToChange()
 			m.preloadAdjacent()
@@ -249,6 +285,7 @@ func (m Model) handleKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if len(m.changes) > 0 && m.selectedIndex > 0 {
 			m.selectedIndex--
 			m.scrollX = 0
+			m.ensureSelectedVisible()
 			m.viewport.SetContent(m.RenderDiff())
 			m.scrollToChange()
 			m.preloadAdjacent()
@@ -317,6 +354,12 @@ func (m *Model) SetFocusLeft(focused bool) {
 func (m *Model) AddChange(change Change) {
 	m.changes = append(m.changes, change)
 	m.selectedIndex = len(m.changes) - 1
+
+	// When 40+ items, start at top (newest) and scroll to show selected
+	if len(m.changes) >= 40 {
+		m.listScrollOffset = 0 // Start at top showing newest items
+	}
+	m.ensureSelectedVisible()
 
 	// Persist if enabled
 	if m.persistent && m.store != nil {
@@ -436,4 +479,59 @@ func (m *Model) UpdateDiffContent() {
 func relativePath(p string) string {
 	// Use diff package's relativePath if available, or implement here
 	return diff.RelativePath(p)
+}
+
+// listVisibleItems returns the number of items that can fit in the list view
+func (m Model) listVisibleItems() int {
+	// Account for header (2 lines: title + separator)
+	availableHeight := m.height - 2
+	if availableHeight < 1 {
+		return 1
+	}
+	return availableHeight
+}
+
+// ensureSelectedVisible adjusts listScrollOffset to keep selected item visible
+func (m *Model) ensureSelectedVisible() {
+	if len(m.changes) == 0 {
+		return
+	}
+
+	// Convert selectedIndex to visual position (list is reversed)
+	// Visual position 0 = changes[len-1], visual position N = changes[len-1-N]
+	visualPos := len(m.changes) - 1 - m.selectedIndex
+
+	visibleItems := m.listVisibleItems()
+
+	// If selected is above visible area, scroll up
+	if visualPos < m.listScrollOffset {
+		m.listScrollOffset = visualPos
+	}
+
+	// If selected is below visible area, scroll down
+	if visualPos >= m.listScrollOffset+visibleItems {
+		m.listScrollOffset = visualPos - visibleItems + 1
+	}
+
+	// Clamp scroll offset
+	maxOffset := len(m.changes) - visibleItems
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.listScrollOffset > maxOffset {
+		m.listScrollOffset = maxOffset
+	}
+	if m.listScrollOffset < 0 {
+		m.listScrollOffset = 0
+	}
+}
+
+// ListScrollOffset returns the current list scroll offset
+func (m Model) ListScrollOffset() int {
+	return m.listScrollOffset
+}
+
+// SetListScrollOffset sets the list scroll offset
+func (m *Model) SetListScrollOffset(offset int) {
+	m.listScrollOffset = offset
 }

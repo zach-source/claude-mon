@@ -25,7 +25,19 @@ func (m Model) RenderList() string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(m.theme.Dim.Render(fmt.Sprintf("History (%d)\n", len(m.changes))))
+
+	// Calculate visible items
+	visibleItems := m.listVisibleItems()
+	totalItems := len(m.changes)
+
+	// Show scroll indicator in header if scrollable
+	if totalItems > visibleItems {
+		scrollInfo := fmt.Sprintf(" [%d-%d/%d]", m.listScrollOffset+1,
+			min(m.listScrollOffset+visibleItems, totalItems), totalItems)
+		sb.WriteString(m.theme.Dim.Render(fmt.Sprintf("History (%d)%s\n", totalItems, scrollInfo)))
+	} else {
+		sb.WriteString(m.theme.Dim.Render(fmt.Sprintf("History (%d)\n", totalItems)))
+	}
 	sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", 20)) + "\n")
 
 	// Calculate available width for path in history pane
@@ -35,9 +47,24 @@ func (m Model) RenderList() string {
 	// Track current commit for grouping
 	currentCommit := ""
 
-	// Iterate in reverse to show newest on top
-	for i := len(m.changes) - 1; i >= 0; i-- {
+	// Calculate the range of items to display
+	// List is rendered in reverse: visual position 0 = changes[len-1]
+	startVisual := m.listScrollOffset
+	endVisual := startVisual + visibleItems
+	if endVisual > totalItems {
+		endVisual = totalItems
+	}
+
+	// Iterate through visible items only
+	for visualPos := startVisual; visualPos < endVisual; visualPos++ {
+		// Convert visual position to array index (reverse mapping)
+		i := totalItems - 1 - visualPos
+		if i < 0 {
+			break
+		}
+
 		change := m.changes[i]
+
 		// Show commit header when commit changes
 		if change.CommitShort != "" && change.CommitShort != currentCommit {
 			currentCommit = change.CommitShort
@@ -69,6 +96,11 @@ func (m Model) RenderList() string {
 				truncatePath(change.FilePath, pathWidth))
 			sb.WriteString(m.theme.Normal.Render("  "+line) + "\n")
 		}
+	}
+
+	// Show scroll indicators at bottom if there's more content
+	if m.listScrollOffset+visibleItems < totalItems {
+		sb.WriteString(m.theme.Dim.Render("  ↓ more...") + "\n")
 	}
 
 	return sb.String()
