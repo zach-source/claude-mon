@@ -1,5 +1,7 @@
 # Claude Code Hooks Setup
 
+> Real-time edit tracking for claude-mon
+
 This guide explains how to install the hooks that send Claude's edits to claude-mon for real-time tracking and persistent history.
 
 ## Prerequisites

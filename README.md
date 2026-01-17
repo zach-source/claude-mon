@@ -32,16 +32,24 @@ A TUI application and daemon for watching Claude Code's file edits in real-time,
 - **Automatic injection**: Inject context into Claude prompts via hooks
 - **TUI management**: Full UI for viewing, editing, and managing context
 
+### Task Automation
+- **Ralph Loop**: Monitor and control iterative Claude loops with promise tracking
+- **And-Then Queue**: Sequential task queue that auto-advances when tasks complete
+- **Queue management**: Cancel, skip, or monitor task progress in real-time
+- **State persistence**: YAML-based state files for reliable resumption
+
 ### UI Features
 - **Two-pane layout**: List on left, content preview on right
 - **Toast notifications**: Floating feedback for all actions
 - **Mode switching**: Toggle between History, Prompts, Ralph, Plan, and Context views
 - **Auto-refresh**: Ralph page auto-refreshes every 5 seconds to track loop progress
+- **Status indicators**: Real-time daemon and socket connection status in status bar
 
 ### Daemon & Data Management
 - **Background daemon**: Tracks all edits from any Claude session
 - **Persistent storage**: SQLite database with WAL mode for reliability
 - **Query interface**: Search edits by file, session, or recency
+- **Heartbeat status**: Real-time connection and workspace activity tracking
 - **Automated cleanup**: Configurable data retention and vacuum
 - **Backup system**: Periodic compressed backups
 - **Workspace filtering**: Track or ignore specific paths
@@ -181,10 +189,17 @@ claude-mon daemon start
 ### Ralph Mode
 | Key | Action |
 |-----|--------|
+| `r` | Manual refresh |
+| `C` | Cancel Ralph loop |
+| `Q` | Cancel And-Then queue |
+| `s` | Skip current And-Then task |
+| `R` | Open Ralph chat |
 | **Auto-refresh** | State refreshes every 5 seconds automatically |
-| View loop status | Shows iteration progress and elapsed time |
-| Read prompt | Displays the current loop prompt |
-| See state path | Shows which state file is active |
+
+**Display Features:**
+- Ralph Loop: Shows iteration progress (e.g., "3/10"), promise, and elapsed time
+- And-Then Queue: Shows task progress (e.g., "2/5"), current task, and "done when" criteria
+- State path: Shows which state file is active
 
 ### Context Mode
 | Key | Action |
@@ -418,7 +433,9 @@ claude-mon-notify.sh
         │                      │                      │
         │                      ├── Cleanup Manager    │
         │                      ├── Backup Manager     │
-        │                      └── Query Interface    │
+        │                      ├── Query Interface    │
+        │                      └── Status/Heartbeat   │
+        │                           └── Workspace activity tracking
         │
         └──► Unix socket ──► claude-mon (TUI)
                                     │
@@ -430,14 +447,19 @@ claude-mon-notify.sh
                                     │   └── Version management
                                     │
                                     ├── Ralph View
-                                    │   └── Loop status monitoring
+                                    │   ├── Ralph Loop status monitoring
+                                    │   └── And-Then Queue management
                                     │
                                     ├── Plan View
                                     │   └── Plan generation
                                     │
-                                    └── Context View
-                                        ├── Project context display
-                                        └── Kubernetes/AWS/Git/Env management
+                                    ├── Context View
+                                    │   ├── Project context display
+                                    │   └── Kubernetes/AWS/Git/Env management
+                                    │
+                                    └── Status Bar
+                                        ├── D● Daemon connection indicator
+                                        └── S● Socket connection indicator
 ```
 
 **Data Flow:**
@@ -483,6 +505,9 @@ claude-mon-notify.sh
 
 ## Recent Enhancements
 
+- ✅ **And-Then Queue** sequential task automation with auto-advance
+- ✅ **Daemon heartbeat** real-time connection and workspace activity tracking
+- ✅ **Status bar indicators** showing daemon (D●) and socket (S●) connection state
 - ✅ **Working context management** with per-project context storage
 - ✅ **Context injection hook** for automatic prompt enhancement
 - ✅ **Five-tab layout**: History, Prompts, Ralph, Plan, and Context modes

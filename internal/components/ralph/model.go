@@ -6,42 +6,48 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/ztaylor/claude-mon/internal/andthen"
 	"github.com/ztaylor/claude-mon/internal/ralph"
 	"github.com/ztaylor/claude-mon/internal/theme"
 )
 
 // KeyMap defines keybindings for ralph mode
 type KeyMap struct {
-	Cancel  key.Binding
-	Refresh key.Binding
-	Chat    key.Binding
+	Cancel      key.Binding
+	Refresh     key.Binding
+	Chat        key.Binding
+	CancelQueue key.Binding
+	SkipTask    key.Binding
 }
 
 // DefaultKeyMap returns default keybindings
 func DefaultKeyMap() KeyMap {
 	return KeyMap{
-		Cancel:  key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "cancel ralph")),
-		Refresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
-		Chat:    key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "ralph chat")),
+		Cancel:      key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "cancel ralph")),
+		Refresh:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		Chat:        key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "ralph chat")),
+		CancelQueue: key.NewBinding(key.WithKeys("Q"), key.WithHelp("Q", "cancel queue")),
+		SkipTask:    key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "skip task")),
 	}
 }
 
 // ShortHelp returns keybindings for short help
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Cancel, k.Refresh}
+	return []key.Binding{k.Cancel, k.CancelQueue, k.Refresh}
 }
 
 // FullHelp returns keybindings for full help
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Cancel, k.Refresh, k.Chat},
+		{k.Cancel, k.CancelQueue, k.Refresh, k.SkipTask, k.Chat},
 	}
 }
 
 // Model represents the ralph component state
 type Model struct {
 	// State
-	state *ralph.State
+	state        *ralph.State
+	andThenState *andthen.State
 
 	// Dependencies
 	theme  *theme.Theme
@@ -96,14 +102,21 @@ func New(opts ...Option) Model {
 	return m
 }
 
-// RefreshState reloads the ralph state from disk
+// RefreshState reloads the ralph and and-then state from disk
 func (m *Model) RefreshState() {
 	state, err := ralph.LoadState()
 	if err != nil {
 		m.state = nil
-		return
+	} else {
+		m.state = state
 	}
-	m.state = state
+
+	andThenState, err := andthen.LoadState()
+	if err != nil {
+		m.andThenState = nil
+	} else {
+		m.andThenState = andThenState
+	}
 }
 
 // Cancel cancels the active ralph loop
@@ -113,6 +126,16 @@ func (m *Model) Cancel() error {
 		return err
 	}
 	m.state = nil
+	return nil
+}
+
+// CancelQueue cancels the active and-then queue
+func (m *Model) CancelQueue() error {
+	_, err := andthen.CancelQueue()
+	if err != nil {
+		return err
+	}
+	m.andThenState = nil
 	return nil
 }
 
@@ -158,6 +181,11 @@ func (m Model) handleKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 			_ = m.Cancel()
 		}
 
+	case key.Matches(msg, m.keyMap.CancelQueue):
+		if m.andThenState != nil && m.andThenState.Active {
+			_ = m.CancelQueue()
+		}
+
 	case key.Matches(msg, m.keyMap.Refresh):
 		m.RefreshState()
 	}
@@ -176,9 +204,24 @@ func (m Model) State() *ralph.State {
 	return m.state
 }
 
-// IsActive returns whether there's an active ralph loop
+// IsActive returns whether there's an active ralph loop or and-then queue
 func (m Model) IsActive() bool {
+	return (m.state != nil && m.state.Active) || (m.andThenState != nil && m.andThenState.Active)
+}
+
+// IsRalphActive returns whether there's an active ralph loop
+func (m Model) IsRalphActive() bool {
 	return m.state != nil && m.state.Active
+}
+
+// IsAndThenActive returns whether there's an active and-then queue
+func (m Model) IsAndThenActive() bool {
+	return m.andThenState != nil && m.andThenState.Active
+}
+
+// AndThenState returns the current and-then state
+func (m Model) AndThenState() *andthen.State {
+	return m.andThenState
 }
 
 // KeyMap returns the current keybindings

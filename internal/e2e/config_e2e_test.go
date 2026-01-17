@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net"
 	"os"
@@ -228,12 +229,9 @@ ignored = ["/tmp", "/var/tmp"]
 		t.Fatalf("Failed to decode response: %v", err)
 	}
 
-	// Check that we got an empty edits list
-	edits, ok := result["edits"].([]interface{})
-	if !ok {
-		t.Fatal("Response missing 'edits' field")
-	}
-
+	// Check that we got an empty or nil edits list (workspace was ignored)
+	// Note: empty slices may be omitted from JSON due to omitempty tag
+	edits, _ := result["edits"].([]interface{})
 	if len(edits) != 0 {
 		t.Errorf("Expected 0 edits (ignored workspace), got %d", len(edits))
 	}
@@ -416,4 +414,134 @@ func findSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// TestFileSnapshotStorage tests that file snapshots are stored and retrieved correctly
+func TestFileSnapshotStorage(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "daemon.toml")
+	daemonSocket := filepath.Join(tempDir, "daemon.sock")
+	querySocket := filepath.Join(tempDir, "query.sock")
+
+	// Create config with custom sockets
+	configContent := `
+[directory]
+data_dir = "` + tempDir + `/data"
+
+[sockets]
+daemon_socket = "` + daemonSocket + `"
+query_socket = "` + querySocket + `"
+
+[workspaces]
+tracked = []
+ignored = []
+`
+
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	// Start daemon
+	cmd := exec.Command("../../bin/claude-mon", "daemon", "start", "--config", configPath)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start daemon: %v", err)
+	}
+	defer cmd.Process.Kill()
+
+	// Wait for daemon to start
+	time.Sleep(3 * time.Second)
+
+	// Create test file content and base64 encode it
+	testFileContent := `package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("Hello, World!")
+}
+`
+	// Base64 encode the file content (simulating what the hook does)
+	fileContentB64 := base64.StdEncoding.EncodeToString([]byte(testFileContent))
+
+	// Send edit event with file content
+	editPayload := map[string]interface{}{
+		"type":             "edit",
+		"workspace":        tempDir + "/workspace",
+		"workspace_name":   "test-workspace",
+		"branch":           "main",
+		"commit_sha":       "abc12345",
+		"vcs_type":         "git",
+		"tool_name":        "Edit",
+		"file_path":        "main.go",
+		"old_string":       "old code",
+		"new_string":       "new code",
+		"file_content_b64": fileContentB64,
+		"line_num":         5,
+		"line_count":       1,
+	}
+
+	conn, err := net.Dial("unix", daemonSocket)
+	if err != nil {
+		t.Fatalf("Failed to connect to daemon: %v", err)
+	}
+
+	if err := json.NewEncoder(conn).Encode(editPayload); err != nil {
+		conn.Close()
+		t.Fatalf("Failed to send payload: %v", err)
+	}
+	conn.Close()
+
+	// Wait for processing
+	time.Sleep(1 * time.Second)
+
+	// Query for recent edits
+	queryConn, err := net.Dial("unix", querySocket)
+	if err != nil {
+		t.Fatalf("Failed to connect to query socket: %v", err)
+	}
+	defer queryConn.Close()
+
+	queryPayload := map[string]interface{}{
+		"type":  "recent",
+		"limit": 1,
+	}
+
+	if err := json.NewEncoder(queryConn).Encode(queryPayload); err != nil {
+		t.Fatalf("Failed to send query: %v", err)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(queryConn).Decode(&result); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	// Verify we got edits back
+	edits, ok := result["edits"].([]interface{})
+	if !ok || len(edits) == 0 {
+		t.Fatal("Expected at least 1 edit")
+	}
+
+	// Check the first edit
+	edit := edits[0].(map[string]interface{})
+
+	// Verify file_content is returned (decompressed from stored snapshot)
+	fileContent, ok := edit["file_content"].(string)
+	if !ok {
+		t.Fatal("Edit missing 'file_content' field")
+	}
+
+	if fileContent != testFileContent {
+		t.Errorf("File content mismatch.\nExpected:\n%s\nGot:\n%s", testFileContent, fileContent)
+	}
+
+	// Verify VCS fields are stored
+	if commitSHA, ok := edit["commit_sha"].(string); !ok || commitSHA != "abc12345" {
+		t.Errorf("Expected commit_sha 'abc12345', got '%v'", edit["commit_sha"])
+	}
+
+	if vcsType, ok := edit["vcs_type"].(string); !ok || vcsType != "git" {
+		t.Errorf("Expected vcs_type 'git', got '%v'", edit["vcs_type"])
+	}
+
+	t.Logf("File snapshot stored and retrieved successfully (%d bytes)", len(fileContent))
 }

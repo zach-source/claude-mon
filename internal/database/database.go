@@ -1,16 +1,42 @@
 package database
 
 import (
+	"bytes"
+	"compress/gzip"
 	"database/sql"
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// compressData compresses data using gzip
+func compressData(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	if _, err := w.Write(data); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// decompressData decompresses gzip data
+func decompressData(data []byte) ([]byte, error) {
+	r, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(r)
+}
 
 //go:embed schema.sql
 var schemaFS embed.FS
@@ -82,6 +108,56 @@ func initSchema(db *sql.DB) error {
 		return fmt.Errorf("failed to execute schema: %w", err)
 	}
 
+	// Run migrations for existing databases
+	if err := runMigrations(db); err != nil {
+		return fmt.Errorf("failed to run migrations: %w", err)
+	}
+
+	return nil
+}
+
+// runMigrations handles schema migrations for existing databases
+func runMigrations(db *sql.DB) error {
+	// Check which columns exist in edits table
+	columns := make(map[string]bool)
+	rows, err := db.Query("PRAGMA table_info(edits)")
+	if err != nil {
+		return fmt.Errorf("failed to get table info: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dfltValue interface{}
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("failed to scan column info: %w", err)
+		}
+		columns[name] = true
+	}
+
+	// Add commit_sha column if missing
+	if !columns["commit_sha"] {
+		if _, err := db.Exec("ALTER TABLE edits ADD COLUMN commit_sha TEXT"); err != nil {
+			return fmt.Errorf("failed to add commit_sha column: %w", err)
+		}
+	}
+
+	// Add vcs_type column if missing
+	if !columns["vcs_type"] {
+		if _, err := db.Exec("ALTER TABLE edits ADD COLUMN vcs_type TEXT"); err != nil {
+			return fmt.Errorf("failed to add vcs_type column: %w", err)
+		}
+	}
+
+	// Add file_snapshot column if missing
+	if !columns["file_snapshot"] {
+		if _, err := db.Exec("ALTER TABLE edits ADD COLUMN file_snapshot BLOB"); err != nil {
+			return fmt.Errorf("failed to add file_snapshot column: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -137,26 +213,31 @@ func (d *DB) GetSession(id int64) (*Session, error) {
 
 // Edit represents a file edit
 type Edit struct {
-	ID        int64     `json:"id"`
-	SessionID int64     `json:"session_id"`
-	ToolName  string    `json:"tool_name"`
-	FilePath  string    `json:"file_path"`
-	OldString string    `json:"old_string"`
-	NewString string    `json:"new_string"`
-	LineNum   int       `json:"line_num"`
-	LineCount int       `json:"line_count"`
-	Timestamp time.Time `json:"created_at"`
+	ID           int64     `json:"id"`
+	SessionID    int64     `json:"session_id"`
+	ToolName     string    `json:"tool_name"`
+	FilePath     string    `json:"file_path"`
+	OldString    string    `json:"old_string"`
+	NewString    string    `json:"new_string"`
+	LineNum      int       `json:"line_num"`
+	LineCount    int       `json:"line_count"`
+	CommitSHA    string    `json:"commit_sha"`   // VCS commit/change ID at time of edit
+	VCSType      string    `json:"vcs_type"`     // "git" or "jj"
+	FileSnapshot []byte    `json:"-"`            // gzip-compressed file content (not in JSON)
+	FileContent  string    `json:"file_content"` // decompressed file content (transient, not stored)
+	Timestamp    time.Time `json:"created_at"`
 }
 
 // RecordEdit records a file edit
 func (d *DB) RecordEdit(edit *Edit) error {
 	query := `
-		INSERT INTO edits (session_id, tool_name, file_path, old_string, new_string, line_num, line_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO edits (session_id, tool_name, file_path, old_string, new_string, line_num, line_count, commit_sha, vcs_type, file_snapshot)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := d.db.Exec(query, edit.SessionID, edit.ToolName, edit.FilePath,
-		edit.OldString, edit.NewString, edit.LineNum, edit.LineCount)
+		edit.OldString, edit.NewString, edit.LineNum, edit.LineCount,
+		edit.CommitSHA, edit.VCSType, edit.FileSnapshot)
 	if err != nil {
 		return fmt.Errorf("failed to record edit: %w", err)
 	}
@@ -257,7 +338,9 @@ func (d *DB) GetPrompts(namePattern string, limit int) ([]*Prompt, error) {
 func (d *DB) GetRecentEdits(limit int) ([]*Edit, error) {
 	query := `
 		SELECT e.id, e.session_id, e.tool_name, e.file_path,
-		       e.old_string, e.new_string, e.line_num, e.line_count, e.timestamp
+		       e.old_string, e.new_string, e.line_num, e.line_count,
+		       COALESCE(e.commit_sha, ''), COALESCE(e.vcs_type, ''),
+		       e.file_snapshot, e.timestamp
 		FROM edits e
 		ORDER BY e.timestamp DESC
 		LIMIT ?
@@ -272,12 +355,21 @@ func (d *DB) GetRecentEdits(limit int) ([]*Edit, error) {
 	var edits []*Edit
 	for rows.Next() {
 		var e Edit
+		var snapshot []byte
 		err := rows.Scan(
 			&e.ID, &e.SessionID, &e.ToolName, &e.FilePath,
-			&e.OldString, &e.NewString, &e.LineNum, &e.LineCount, &e.Timestamp,
+			&e.OldString, &e.NewString, &e.LineNum, &e.LineCount,
+			&e.CommitSHA, &e.VCSType, &snapshot, &e.Timestamp,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan edit: %w", err)
+		}
+
+		// Decompress file snapshot if present
+		if len(snapshot) > 0 {
+			if content, err := decompressData(snapshot); err == nil {
+				e.FileContent = string(content)
+			}
 		}
 
 		edits = append(edits, &e)
@@ -290,7 +382,9 @@ func (d *DB) GetRecentEdits(limit int) ([]*Edit, error) {
 func (d *DB) GetEditsByWorkspace(workspacePath string, limit int) ([]*Edit, error) {
 	query := `
 		SELECT e.id, e.session_id, e.tool_name, e.file_path,
-		       e.old_string, e.new_string, e.line_num, e.line_count, e.timestamp
+		       e.old_string, e.new_string, e.line_num, e.line_count,
+		       COALESCE(e.commit_sha, ''), COALESCE(e.vcs_type, ''),
+		       e.file_snapshot, e.timestamp
 		FROM edits e
 		JOIN sessions s ON e.session_id = s.id
 		WHERE s.workspace_path = ?
@@ -307,12 +401,21 @@ func (d *DB) GetEditsByWorkspace(workspacePath string, limit int) ([]*Edit, erro
 	var edits []*Edit
 	for rows.Next() {
 		var e Edit
+		var snapshot []byte
 		err := rows.Scan(
 			&e.ID, &e.SessionID, &e.ToolName, &e.FilePath,
-			&e.OldString, &e.NewString, &e.LineNum, &e.LineCount, &e.Timestamp,
+			&e.OldString, &e.NewString, &e.LineNum, &e.LineCount,
+			&e.CommitSHA, &e.VCSType, &snapshot, &e.Timestamp,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan edit: %w", err)
+		}
+
+		// Decompress file snapshot if present
+		if len(snapshot) > 0 {
+			if content, err := decompressData(snapshot); err == nil {
+				e.FileContent = string(content)
+			}
 		}
 
 		edits = append(edits, &e)
@@ -325,7 +428,9 @@ func (d *DB) GetEditsByWorkspace(workspacePath string, limit int) ([]*Edit, erro
 func (d *DB) GetEditsByFile(filePath string, limit int) ([]*Edit, error) {
 	query := `
 		SELECT id, session_id, tool_name, file_path,
-		       old_string, new_string, line_num, line_count, timestamp
+		       old_string, new_string, line_num, line_count,
+		       COALESCE(commit_sha, ''), COALESCE(vcs_type, ''),
+		       file_snapshot, timestamp
 		FROM edits
 		WHERE file_path = ?
 		ORDER BY timestamp DESC
@@ -341,12 +446,21 @@ func (d *DB) GetEditsByFile(filePath string, limit int) ([]*Edit, error) {
 	var edits []*Edit
 	for rows.Next() {
 		var e Edit
+		var snapshot []byte
 		err := rows.Scan(
 			&e.ID, &e.SessionID, &e.ToolName, &e.FilePath,
-			&e.OldString, &e.NewString, &e.LineNum, &e.LineCount, &e.Timestamp,
+			&e.OldString, &e.NewString, &e.LineNum, &e.LineCount,
+			&e.CommitSHA, &e.VCSType, &snapshot, &e.Timestamp,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan edit: %w", err)
+		}
+
+		// Decompress file snapshot if present
+		if len(snapshot) > 0 {
+			if content, err := decompressData(snapshot); err == nil {
+				e.FileContent = string(content)
+			}
 		}
 
 		edits = append(edits, &e)

@@ -81,3 +81,17 @@ type daemonHistoryMsg struct {
 	changes []Change
 	err     error
 }
+
+// daemonStatusMsg is sent when daemon status check completes
+type daemonStatusMsg struct {
+	connected       bool
+	uptime          string
+	workspaceActive bool
+	workspaceEdits  int
+	lastActivity    time.Time
+}
+
+// daemonStatusTickMsg is sent to trigger periodic daemon status checks
+type daemonStatusTickMsg struct {
+	time.Time
+}

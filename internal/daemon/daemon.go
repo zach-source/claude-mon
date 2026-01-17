@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"bytes"
+	"compress/gzip"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +26,14 @@ const (
 	DefaultQuerySocketPath = "/tmp/claude-mon-query.sock"
 )
 
+// WorkspaceActivity tracks activity for a workspace
+type WorkspaceActivity struct {
+	Path         string    `json:"path"`
+	Name         string    `json:"name"`
+	LastActivity time.Time `json:"last_activity"`
+	EditCount    int       `json:"edit_count"`
+}
+
 // Daemon manages the daemon server
 type Daemon struct {
 	cfg            *Config
@@ -35,6 +46,11 @@ type Daemon struct {
 	queryListener  net.Listener
 	wg             sync.WaitGroup
 	shutdown       chan struct{}
+
+	// Activity tracking
+	workspacesMu sync.RWMutex
+	workspaces   map[string]*WorkspaceActivity
+	startedAt    time.Time
 }
 
 // DefaultConfig returns default daemon configuration
@@ -61,6 +77,8 @@ func New(cfg *Config) (*Daemon, error) {
 		socketPath: cfg.Sockets.DaemonSocket,
 		queryPath:  cfg.Sockets.QuerySocket,
 		shutdown:   make(chan struct{}),
+		workspaces: make(map[string]*WorkspaceActivity),
+		startedAt:  time.Now(),
 	}
 
 	// Initialize cleanup manager
@@ -209,21 +227,23 @@ func (d *Daemon) handleQuery(conn net.Conn) {
 
 // HookPayload represents data from Claude hooks
 type HookPayload struct {
-	SessionID     int64    `json:"session_id"`
-	Workspace     string   `json:"workspace"`
-	WorkspaceName string   `json:"workspace_name"`
-	Branch        string   `json:"branch"`
-	CommitSHA     string   `json:"commit_sha"`
-	ToolName      string   `json:"tool_name"`
-	FilePath      string   `json:"file_path"`
-	OldString     string   `json:"old_string"`
-	NewString     string   `json:"new_string"`
-	LineNum       int      `json:"line_num"`
-	LineCount     int      `json:"line_count"`
-	Type          string   `json:"type"` // "edit" or "prompt"
-	PromptName    string   `json:"prompt_name,omitempty"`
-	PromptDesc    string   `json:"prompt_description,omitempty"`
-	PromptTags    []string `json:"prompt_tags,omitempty"`
+	SessionID      int64    `json:"session_id"`
+	Workspace      string   `json:"workspace"`
+	WorkspaceName  string   `json:"workspace_name"`
+	Branch         string   `json:"branch"`
+	CommitSHA      string   `json:"commit_sha"`
+	VCSType        string   `json:"vcs_type"` // "git" or "jj"
+	ToolName       string   `json:"tool_name"`
+	FilePath       string   `json:"file_path"`
+	OldString      string   `json:"old_string"`
+	NewString      string   `json:"new_string"`
+	FileContentB64 string   `json:"file_content_b64"` // base64-encoded file content
+	LineNum        int      `json:"line_num"`
+	LineCount      int      `json:"line_count"`
+	Type           string   `json:"type"` // "edit" or "prompt"
+	PromptName     string   `json:"prompt_name,omitempty"`
+	PromptDesc     string   `json:"prompt_description,omitempty"`
+	PromptTags     []string `json:"prompt_tags,omitempty"`
 }
 
 // processPayload processes incoming hook data
@@ -233,6 +253,9 @@ func (d *Daemon) processPayload(payload *HookPayload) error {
 		logger.Log("Workspace %s is being ignored", payload.Workspace)
 		return nil
 	}
+
+	// Track workspace activity
+	d.trackWorkspaceActivity(payload.Workspace, payload.WorkspaceName, payload.Type == "edit")
 
 	// Ensure session exists
 	sessionID, err := d.db.UpsertSession(
@@ -255,11 +278,34 @@ func (d *Daemon) processPayload(payload *HookPayload) error {
 			NewString: payload.NewString,
 			LineNum:   payload.LineNum,
 			LineCount: payload.LineCount,
+			CommitSHA: payload.CommitSHA,
+			VCSType:   payload.VCSType,
 		}
+
+		// Decode and compress file content if provided
+		if payload.FileContentB64 != "" {
+			decoded, err := base64.StdEncoding.DecodeString(payload.FileContentB64)
+			if err != nil {
+				logger.Log("Warning: failed to decode file content: %v", err)
+			} else {
+				// Compress the file content with gzip
+				var buf bytes.Buffer
+				w := gzip.NewWriter(&buf)
+				if _, err := w.Write(decoded); err != nil {
+					logger.Log("Warning: failed to compress file content: %v", err)
+				} else if err := w.Close(); err != nil {
+					logger.Log("Warning: failed to finalize compression: %v", err)
+				} else {
+					edit.FileSnapshot = buf.Bytes()
+					logger.Log("Compressed file snapshot: %d bytes -> %d bytes", len(decoded), len(edit.FileSnapshot))
+				}
+			}
+		}
+
 		if err := d.db.RecordEdit(edit); err != nil {
 			return fmt.Errorf("failed to record edit: %w", err)
 		}
-		logger.Log("Recorded edit: %s to %s", payload.ToolName, payload.FilePath)
+		logger.Log("Recorded edit: %s to %s (vcs=%s, sha=%s)", payload.ToolName, payload.FilePath, payload.VCSType, payload.CommitSHA)
 
 	case "prompt":
 		prompt := &database.Prompt{
@@ -282,6 +328,26 @@ func (d *Daemon) processPayload(payload *HookPayload) error {
 	return nil
 }
 
+// trackWorkspaceActivity updates the activity tracker for a workspace
+func (d *Daemon) trackWorkspaceActivity(path, name string, isEdit bool) {
+	d.workspacesMu.Lock()
+	defer d.workspacesMu.Unlock()
+
+	activity, exists := d.workspaces[path]
+	if !exists {
+		activity = &WorkspaceActivity{
+			Path: path,
+			Name: name,
+		}
+		d.workspaces[path] = activity
+	}
+
+	activity.LastActivity = time.Now()
+	if isEdit {
+		activity.EditCount++
+	}
+}
+
 // sqlInt64 converts int64 to sql.NullInt64
 func sqlInt64(v int64) sql.NullInt64 {
 	return sql.NullInt64{Int64: v, Valid: true}
@@ -289,19 +355,29 @@ func sqlInt64(v int64) sql.NullInt64 {
 
 // Query represents a database query
 type Query struct {
-	Type          string `json:"type"` // "recent", "workspace", "file", "prompts", "sessions"
+	Type          string `json:"type"` // "recent", "workspace", "file", "prompts", "sessions", "status"
 	WorkspacePath string `json:"workspace_path,omitempty"`
 	FilePath      string `json:"file_path,omitempty"`
 	Name          string `json:"name,omitempty"`
 	Limit         int    `json:"limit,omitempty"`
 }
 
+// StatusResult represents daemon status
+type StatusResult struct {
+	Running         bool                          `json:"running"`
+	Uptime          time.Duration                 `json:"uptime"`
+	UptimeStr       string                        `json:"uptime_str"`
+	ActiveWorkspace *WorkspaceActivity            `json:"active_workspace,omitempty"`
+	Workspaces      map[string]*WorkspaceActivity `json:"workspaces"`
+}
+
 // QueryResult represents query results
 type QueryResult struct {
 	Type     string              `json:"type"`
-	Edits    []*database.Edit    `json:"edits"`
-	Prompts  []*database.Prompt  `json:"prompts"`
-	Sessions []*database.Session `json:"sessions"`
+	Edits    []*database.Edit    `json:"edits,omitempty"`
+	Prompts  []*database.Prompt  `json:"prompts,omitempty"`
+	Sessions []*database.Session `json:"sessions,omitempty"`
+	Status   *StatusResult       `json:"status,omitempty"`
 }
 
 // executeQuery executes a database query
@@ -379,11 +455,60 @@ func (d *Daemon) executeQuery(query *Query) (*QueryResult, error) {
 			result.Sessions = sessions
 		}
 
+	case "status":
+		result.Status = d.getStatus(query.WorkspacePath)
+
 	default:
 		return nil, fmt.Errorf("unknown query type: %s", query.Type)
 	}
 
 	return result, nil
+}
+
+// getStatus returns the daemon status, optionally checking for a specific workspace
+func (d *Daemon) getStatus(workspacePath string) *StatusResult {
+	uptime := time.Since(d.startedAt)
+
+	// Format uptime string
+	var uptimeStr string
+	if uptime < time.Minute {
+		uptimeStr = fmt.Sprintf("%ds", int(uptime.Seconds()))
+	} else if uptime < time.Hour {
+		uptimeStr = fmt.Sprintf("%dm", int(uptime.Minutes()))
+	} else if uptime < 24*time.Hour {
+		hours := int(uptime.Hours())
+		mins := int(uptime.Minutes()) % 60
+		uptimeStr = fmt.Sprintf("%dh %dm", hours, mins)
+	} else {
+		days := int(uptime.Hours() / 24)
+		hours := int(uptime.Hours()) % 24
+		uptimeStr = fmt.Sprintf("%dd %dh", days, hours)
+	}
+
+	d.workspacesMu.RLock()
+	defer d.workspacesMu.RUnlock()
+
+	// Copy workspaces map
+	workspaces := make(map[string]*WorkspaceActivity, len(d.workspaces))
+	for k, v := range d.workspaces {
+		workspaces[k] = v
+	}
+
+	status := &StatusResult{
+		Running:    true,
+		Uptime:     uptime,
+		UptimeStr:  uptimeStr,
+		Workspaces: workspaces,
+	}
+
+	// Check if specific workspace is active
+	if workspacePath != "" {
+		if activity, exists := d.workspaces[workspacePath]; exists {
+			status.ActiveWorkspace = activity
+		}
+	}
+
+	return status
 }
 
 // waitForShutdown waits for shutdown signal

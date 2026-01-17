@@ -30,6 +30,7 @@ import (
 	"github.com/ztaylor/claude-mon/internal/prompt"
 	"github.com/ztaylor/claude-mon/internal/ralph"
 	"github.com/ztaylor/claude-mon/internal/theme"
+	"github.com/ztaylor/claude-mon/internal/vcs"
 )
 
 // Change represents a single file change from Claude
@@ -181,6 +182,14 @@ type Model struct {
 	// Keybindings (bubbles/key integration)
 	keyMap KeyMap     // KeyMap with help text for bubbles/help
 	help   help.Model // bubbles/help for rendering keybinding help
+
+	// Daemon connection status
+	daemonConnected       bool      // Whether daemon is reachable
+	daemonUptime          string    // Daemon uptime string
+	daemonLastCheck       time.Time // Last time we checked daemon status
+	daemonWorkspaceActive bool      // Whether current workspace has activity
+	daemonWorkspaceEdits  int       // Edit count for current workspace
+	daemonLastActivity    time.Time // Last activity time for current workspace
 }
 
 // Option is a functional option for configuring the Model
@@ -347,6 +356,9 @@ func (m Model) Init() tea.Cmd {
 		m.loadContextCmd(),
 		// Query daemon for recent history
 		m.queryDaemonHistoryCmd(),
+		// Query daemon status and start periodic checks
+		m.queryDaemonStatusCmd(),
+		m.startDaemonStatusTicker(),
 	)
 }
 
@@ -401,15 +413,18 @@ func (m Model) queryDaemonHistoryCmd() tea.Cmd {
 		var result struct {
 			Type  string `json:"type"`
 			Edits []struct {
-				ID        int64     `json:"id"`
-				SessionID int64     `json:"session_id"`
-				ToolName  string    `json:"tool_name"`
-				FilePath  string    `json:"file_path"`
-				OldString string    `json:"old_string"`
-				NewString string    `json:"new_string"`
-				LineNum   int       `json:"line_num"`
-				LineCount int       `json:"line_count"`
-				CreatedAt time.Time `json:"created_at"`
+				ID          int64     `json:"id"`
+				SessionID   int64     `json:"session_id"`
+				ToolName    string    `json:"tool_name"`
+				FilePath    string    `json:"file_path"`
+				OldString   string    `json:"old_string"`
+				NewString   string    `json:"new_string"`
+				LineNum     int       `json:"line_num"`
+				LineCount   int       `json:"line_count"`
+				CommitSHA   string    `json:"commit_sha"`
+				VCSType     string    `json:"vcs_type"`
+				FileContent string    `json:"file_content"`
+				CreatedAt   time.Time `json:"created_at"`
 			} `json:"edits"`
 			Error string `json:"error,omitempty"`
 		}
@@ -427,20 +442,110 @@ func (m Model) queryDaemonHistoryCmd() tea.Cmd {
 		// Convert edits to changes
 		var changes []Change
 		for _, edit := range result.Edits {
-			changes = append(changes, Change{
-				Timestamp: edit.CreatedAt,
-				FilePath:  edit.FilePath,
-				ToolName:  edit.ToolName,
-				OldString: edit.OldString,
-				NewString: edit.NewString,
-				LineNum:   edit.LineNum,
-				LineCount: edit.LineCount,
-			})
+			change := Change{
+				Timestamp:   edit.CreatedAt,
+				FilePath:    edit.FilePath,
+				ToolName:    edit.ToolName,
+				OldString:   edit.OldString,
+				NewString:   edit.NewString,
+				LineNum:     edit.LineNum,
+				LineCount:   edit.LineCount,
+				CommitSHA:   edit.CommitSHA,
+				VCSType:     edit.VCSType,
+				FileContent: edit.FileContent,
+			}
+			// Set short commit SHA for display
+			if len(edit.CommitSHA) >= 8 {
+				change.CommitShort = edit.CommitSHA[:8]
+			} else if edit.CommitSHA != "" {
+				change.CommitShort = edit.CommitSHA
+			}
+			changes = append(changes, change)
 		}
 
 		logger.Log("Loaded %d edits from daemon", len(changes))
 		return daemonHistoryMsg{changes: changes}
 	}
+}
+
+// queryDaemonStatusCmd queries the daemon for its status and workspace activity
+func (m Model) queryDaemonStatusCmd() tea.Cmd {
+	return func() tea.Msg {
+		// Get current workspace path
+		workspacePath, err := os.Getwd()
+		if err != nil {
+			logger.Log("Failed to get working directory: %v", err)
+			return daemonStatusMsg{connected: false}
+		}
+
+		// Try to connect to daemon query socket
+		querySocket := "/tmp/claude-mon-query.sock"
+		conn, err := net.DialTimeout("unix", querySocket, 1*time.Second)
+		if err != nil {
+			// Daemon not running - not an error, just mark as disconnected
+			return daemonStatusMsg{connected: false}
+		}
+		defer conn.Close()
+
+		// Set read/write deadline
+		conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+		// Send status query for this workspace
+		query := map[string]interface{}{
+			"type":           "status",
+			"workspace_path": workspacePath,
+		}
+		if err := json.NewEncoder(conn).Encode(query); err != nil {
+			logger.Log("Failed to send status query: %v", err)
+			return daemonStatusMsg{connected: false}
+		}
+
+		// Read response
+		var result struct {
+			Type   string `json:"type"`
+			Status struct {
+				Running   bool   `json:"running"`
+				UptimeStr string `json:"uptime_str"`
+				Active    *struct {
+					Path         string    `json:"path"`
+					Name         string    `json:"name"`
+					LastActivity time.Time `json:"last_activity"`
+					EditCount    int       `json:"edit_count"`
+				} `json:"active_workspace,omitempty"`
+			} `json:"status"`
+			Error string `json:"error,omitempty"`
+		}
+
+		if err := json.NewDecoder(conn).Decode(&result); err != nil {
+			logger.Log("Failed to decode status response: %v", err)
+			return daemonStatusMsg{connected: false}
+		}
+
+		if result.Error != "" {
+			logger.Log("Daemon status error: %s", result.Error)
+			return daemonStatusMsg{connected: false}
+		}
+
+		msg := daemonStatusMsg{
+			connected: true,
+			uptime:    result.Status.UptimeStr,
+		}
+
+		if result.Status.Active != nil {
+			msg.workspaceActive = true
+			msg.workspaceEdits = result.Status.Active.EditCount
+			msg.lastActivity = result.Status.Active.LastActivity
+		}
+
+		return msg
+	}
+}
+
+// startDaemonStatusTicker returns a command that starts the daemon status check ticker
+func (m Model) startDaemonStatusTicker() tea.Cmd {
+	return tea.Tick(10*time.Second, func(t time.Time) tea.Msg {
+		return daemonStatusTickMsg{t}
+	})
 }
 
 // LeaderActivatedAt returns when leader mode was activated
@@ -1091,6 +1196,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastMsgTime = time.Now()
 			logger.Log("Added %d changes from daemon, total now: %d", len(msg.changes), len(m.changes))
 		}
+
+	case daemonStatusMsg:
+		m.daemonConnected = msg.connected
+		m.daemonUptime = msg.uptime
+		m.daemonLastCheck = time.Now()
+		m.daemonWorkspaceActive = msg.workspaceActive
+		m.daemonWorkspaceEdits = msg.workspaceEdits
+		m.daemonLastActivity = msg.lastActivity
+
+	case daemonStatusTickMsg:
+		// Periodic daemon status check
+		cmds = append(cmds, m.queryDaemonStatusCmd(), m.startDaemonStatusTicker())
 	}
 
 	return m, tea.Batch(cmds...)
@@ -2694,15 +2811,41 @@ func (m *Model) renderDiff() string {
 
 	change := m.changes[m.selectedIndex]
 
-	// If FileContent is empty (e.g., loaded from history), try to read the file
+	// If FileContent is empty (e.g., loaded from history), try to retrieve it
 	if change.FileContent == "" && change.FilePath != "" && change.ToolName != "Write" {
-		if content, err := os.ReadFile(change.FilePath); err == nil {
-			change.FileContent = string(content)
+		var fileContent string
+		var err error
+		var source string
+
+		// Try VCS-based retrieval if we have commit info
+		if change.CommitSHA != "" && change.VCSType != "" {
+			// Get workspace root from file path directory
+			dir := filepath.Dir(change.FilePath)
+			if workspaceRoot, rootErr := vcs.GetWorkspaceRoot(dir, change.VCSType); rootErr == nil {
+				fileContent, err = vcs.GetFileAtCommit(workspaceRoot, change.FilePath, change.CommitSHA, change.VCSType)
+				if err == nil {
+					source = fmt.Sprintf("VCS (%s@%s)", change.VCSType, change.CommitSHA[:min(8, len(change.CommitSHA))])
+				}
+			}
+		}
+
+		// Fall back to reading current file if VCS retrieval failed
+		if fileContent == "" {
+			if content, readErr := os.ReadFile(change.FilePath); readErr == nil {
+				fileContent = string(content)
+				source = "current file"
+			} else {
+				err = readErr
+			}
+		}
+
+		if fileContent != "" {
+			change.FileContent = fileContent
 			// Update the stored change so we don't re-read every time
 			m.changes[m.selectedIndex] = change
-			logger.Log("Re-read file content for history entry: %s (%d bytes)", change.FilePath, len(change.FileContent))
+			logger.Log("Retrieved file content for history entry: %s (%d bytes, source: %s)", change.FilePath, len(change.FileContent), source)
 		} else {
-			logger.Log("Failed to re-read file for history entry: %s: %v", change.FilePath, err)
+			logger.Log("Failed to retrieve file for history entry: %s: %v", change.FilePath, err)
 		}
 	}
 
@@ -3178,7 +3321,7 @@ func (m Model) renderStatus() string {
 		paneIndicator = "R"
 	}
 
-	// Socket connection indicator
+	// Socket connection indicator (local nvim socket)
 	socketIndicator := "○" // Disconnected/no recent activity
 	socketStyle := m.theme.Dim
 	if m.socketConnected {
@@ -3191,16 +3334,34 @@ func (m Model) renderStatus() string {
 		}
 	}
 
-	// Build status: left side info, right side socket indicator
+	// Daemon connection indicator
+	daemonIndicator := "○" // Not connected
+	daemonStyle := m.theme.Dim
+	if m.daemonConnected {
+		if m.daemonWorkspaceActive && time.Since(m.daemonLastActivity) < 5*time.Minute {
+			daemonIndicator = "●" // Connected with recent workspace activity
+			daemonStyle = m.theme.Added
+		} else if m.daemonWorkspaceActive {
+			daemonIndicator = "◐" // Connected, workspace tracked but idle
+			daemonStyle = m.theme.Modified
+		} else {
+			daemonIndicator = "◑" // Connected but workspace not tracked
+			daemonStyle = m.theme.Dim
+		}
+	}
+
+	// Build status: left side info, right side indicators
 	leftStatus := fmt.Sprintf(
 		"%s [%s]  %s/%s:nav  Tab:mode  [/]:pane  ^G:menu",
 		modeName, paneIndicator, k.Down, k.Up)
 
-	// Calculate padding to push socket indicator to right
+	// Build right side: daemon indicator + socket indicator
+	rightPart := daemonStyle.Render("D"+daemonIndicator) + " " + socketStyle.Render("S"+socketIndicator)
+	rightLen := 5 // "D● S●" = 5 chars
+
+	// Calculate padding to push indicators to right
 	statusWidth := m.width - 2
 	leftLen := len(leftStatus)
-	rightPart := socketStyle.Render(socketIndicator)
-	rightLen := 1 // Just the symbol
 
 	padding := statusWidth - leftLen - rightLen
 	if padding < 1 {

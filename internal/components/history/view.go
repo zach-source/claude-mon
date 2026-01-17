@@ -3,12 +3,14 @@ package history
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ztaylor/claude-mon/internal/diff"
 	"github.com/ztaylor/claude-mon/internal/minimap"
+	"github.com/ztaylor/claude-mon/internal/vcs"
 )
 
 // View renders the history list for the left pane
@@ -87,10 +89,29 @@ func (m *Model) RenderDiff() string {
 
 	change := m.changes[m.selectedIndex]
 
-	// If FileContent is empty (e.g., loaded from history), try to read the file
+	// If FileContent is empty (e.g., loaded from history), try to retrieve it
 	if change.FileContent == "" && change.FilePath != "" && change.ToolName != "Write" {
-		if content, err := os.ReadFile(change.FilePath); err == nil {
-			change.FileContent = string(content)
+		var fileContent string
+
+		// Try VCS-based retrieval if we have commit info
+		if change.CommitSHA != "" && change.VCSType != "" {
+			dir := filepath.Dir(change.FilePath)
+			if workspaceRoot, err := vcs.GetWorkspaceRoot(dir, change.VCSType); err == nil {
+				if content, err := vcs.GetFileAtCommit(workspaceRoot, change.FilePath, change.CommitSHA, change.VCSType); err == nil {
+					fileContent = content
+				}
+			}
+		}
+
+		// Fall back to reading current file if VCS retrieval failed
+		if fileContent == "" {
+			if content, err := os.ReadFile(change.FilePath); err == nil {
+				fileContent = string(content)
+			}
+		}
+
+		if fileContent != "" {
+			change.FileContent = fileContent
 			// Update the stored change so we don't re-read every time
 			m.changes[m.selectedIndex] = change
 		}

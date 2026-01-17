@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS edits (
     new_string TEXT,
     line_num INTEGER,
     line_count INTEGER,
+    commit_sha TEXT,      -- VCS commit/change ID at time of edit
+    vcs_type TEXT,        -- "git" or "jj"
+    file_snapshot BLOB,   -- gzip-compressed file content at time of edit
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
