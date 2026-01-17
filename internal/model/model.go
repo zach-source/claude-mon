@@ -1064,10 +1064,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case promptEditedMsg:
-		// Prompt was edited in nvim - refresh list
+		// Prompt was edited in nvim - update frontmatter and refresh list
 		logger.Log("Prompt edited: %s, leftPaneMode=%d", msg.path, m.leftPaneMode)
 		m.promptRefining = false
 		m.leftPaneMode = LeftPaneModePrompts // Ensure we stay in prompts mode
+
+		// Update version and timestamp in frontmatter
+		if m.promptStore != nil {
+			if err := m.promptStore.UpdateAfterEdit(msg.path); err != nil {
+				logger.Log("Failed to update prompt frontmatter: %v", err)
+			}
+		}
+
 		m.refreshPromptList()
 		m.diffViewport.SetContent(m.renderRightPane())
 		m.addToast("Prompt saved", ToastSuccess)

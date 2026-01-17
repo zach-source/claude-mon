@@ -260,6 +260,29 @@ func (p *Prompt) Format() string {
 	return sb.String()
 }
 
+// UpdateAfterEdit reloads a prompt after external editing (e.g., nvim),
+// increments the version, updates the timestamp, and saves it back.
+// This ensures frontmatter stays current even when the file is edited externally.
+func (s *Store) UpdateAfterEdit(path string) error {
+	// Load the prompt (picks up any content changes from external editor)
+	prompt, err := s.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load prompt: %w", err)
+	}
+
+	// Increment version and update timestamp
+	prompt.Version++
+	prompt.Updated = time.Now()
+
+	// Write back with updated frontmatter
+	content := prompt.Format()
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to save prompt: %w", err)
+	}
+
+	return nil
+}
+
 // Delete removes a prompt file
 func (s *Store) Delete(path string) error {
 	return os.Remove(path)
