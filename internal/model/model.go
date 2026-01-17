@@ -105,30 +105,31 @@ const (
 
 // Model is the Bubbletea model
 type Model struct {
-	socketPath      string
-	socketConnected bool      // Whether socket is listening
-	lastMsgTime     time.Time // Time of last received message
-	width           int
-	height          int
-	activePane      Pane
-	leftPaneMode    LeftPaneMode // History or Prompts mode
-	changes         []Change
-	selectedIndex   int
-	diffViewport    viewport.Model
-	showHelp        bool
-	showMinimap     bool // Toggle minimap visibility
-	planContent     string
-	planPath        string
-	planViewport    viewport.Model
-	ready           bool
-	theme           *theme.Theme
-	highlighter     *highlight.Highlighter
-	scrollX         int              // Horizontal scroll offset
-	totalLines      int              // Total lines in current file (for minimap)
-	minimapData     *minimap.Minimap // Cached minimap line types
-	diffCache       map[int]string   // Cached rendered diffs by index
-	historyStore    *history.Store   // Persistent history storage
-	persistHistory  bool             // Whether to save history to file
+	socketPath       string
+	socketConnected  bool      // Whether socket is listening
+	lastMsgTime      time.Time // Time of last received message
+	width            int
+	height           int
+	activePane       Pane
+	leftPaneMode     LeftPaneMode // History or Prompts mode
+	changes          []Change
+	selectedIndex    int
+	diffViewport     viewport.Model
+	showHelp         bool
+	showMinimap      bool // Toggle minimap visibility
+	planContent      string
+	planPath         string
+	planViewport     viewport.Model
+	ready            bool
+	theme            *theme.Theme
+	highlighter      *highlight.Highlighter
+	scrollX          int              // Horizontal scroll offset
+	listScrollOffset int              // Vertical scroll offset for history list
+	totalLines       int              // Total lines in current file (for minimap)
+	minimapData      *minimap.Minimap // Cached minimap line types
+	diffCache        map[int]string   // Cached rendered diffs by index
+	historyStore     *history.Store   // Persistent history storage
+	persistHistory   bool             // Whether to save history to file
 
 	// Prompt manager (integrated in left pane)
 	promptStore          *prompt.Store          // Prompt storage
@@ -1030,9 +1031,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-			// Select the newly added change (most recent)
+			// Select the newly added change (most recent, at top of visual list)
 			m.selectedIndex = len(m.changes) - 1
 			m.scrollX = 0
+			m.listScrollOffset = 0 // Keep newest visible at top
+			m.ensureSelectedVisible()
 			m.diffViewport.SetContent(m.renderDiff())
 		} else {
 			logger.Log("parsePayload returned nil")
@@ -1188,9 +1191,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-			// Select most recent
+			// Select most recent (newest is at highest index)
 			if len(m.changes) > 0 {
 				m.selectedIndex = len(m.changes) - 1
+				m.listScrollOffset = 0 // Start at top showing newest
+				m.ensureSelectedVisible()
 				m.diffViewport.SetContent(m.renderDiff())
 			}
 			m.lastMsgTime = time.Now()
@@ -1219,10 +1224,12 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case m.config.Keys.Down, "down":
 		if m.activePane == PaneLeft {
-			// Navigate history
-			if len(m.changes) > 0 && m.selectedIndex < len(m.changes)-1 {
-				m.selectedIndex++
+			// Navigate history list down (older items = lower index)
+			// Data is oldest-first, display is newest-first (reversed)
+			if len(m.changes) > 0 && m.selectedIndex > 0 {
+				m.selectedIndex--
 				m.scrollX = 0
+				m.ensureSelectedVisible()
 				m.diffViewport.SetContent(m.renderDiff())
 				m.scrollToChange()
 				m.preloadAdjacent()
@@ -1232,10 +1239,11 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case m.config.Keys.Up, "up":
 		if m.activePane == PaneLeft {
-			// Navigate history
-			if len(m.changes) > 0 && m.selectedIndex > 0 {
-				m.selectedIndex--
+			// Navigate history list up (newer items = higher index)
+			if len(m.changes) > 0 && m.selectedIndex < len(m.changes)-1 {
+				m.selectedIndex++
 				m.scrollX = 0
+				m.ensureSelectedVisible()
 				m.diffViewport.SetContent(m.renderDiff())
 				m.scrollToChange()
 				m.preloadAdjacent()
@@ -1243,20 +1251,52 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.diffViewport.LineUp(1)
 		}
-	case m.config.Keys.Next:
-		// Next change in queue
-		if len(m.changes) > 0 && m.selectedIndex < len(m.changes)-1 {
-			m.selectedIndex++
+	case m.config.Keys.PageDown:
+		if m.activePane == PaneLeft {
+			// Page down in history list (older items = lower indices)
+			visibleItems := m.listVisibleItems()
+			for i := 0; i < visibleItems && m.selectedIndex > 0; i++ {
+				m.selectedIndex--
+			}
 			m.scrollX = 0
+			m.ensureSelectedVisible()
+			m.diffViewport.SetContent(m.renderDiff())
+			m.scrollToChange()
+			m.preloadAdjacent()
+		} else {
+			m.diffViewport.ViewDown()
+		}
+	case m.config.Keys.PageUp:
+		if m.activePane == PaneLeft {
+			// Page up in history list (newer items = higher indices)
+			visibleItems := m.listVisibleItems()
+			for i := 0; i < visibleItems && m.selectedIndex < len(m.changes)-1; i++ {
+				m.selectedIndex++
+			}
+			m.scrollX = 0
+			m.ensureSelectedVisible()
+			m.diffViewport.SetContent(m.renderDiff())
+			m.scrollToChange()
+			m.preloadAdjacent()
+		} else {
+			m.diffViewport.ViewUp()
+		}
+	case m.config.Keys.Next:
+		// Next change in time (older = lower index)
+		if len(m.changes) > 0 && m.selectedIndex > 0 {
+			m.selectedIndex--
+			m.scrollX = 0
+			m.ensureSelectedVisible()
 			m.diffViewport.SetContent(m.renderDiff())
 			m.scrollToChange()
 			m.preloadAdjacent()
 		}
 	case m.config.Keys.Prev:
-		// Previous change in queue
-		if len(m.changes) > 0 && m.selectedIndex > 0 {
-			m.selectedIndex--
+		// Previous change in time (newer = higher index)
+		if len(m.changes) > 0 && m.selectedIndex < len(m.changes)-1 {
+			m.selectedIndex++
 			m.scrollX = 0
+			m.ensureSelectedVisible()
 			m.diffViewport.SetContent(m.renderDiff())
 			m.scrollToChange()
 			m.preloadAdjacent()
@@ -1275,6 +1315,7 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case m.config.Keys.ClearHistory:
 		m.changes = []Change{}
 		m.selectedIndex = 0
+		m.listScrollOffset = 0
 		m.diffViewport.SetContent("")
 		m.diffCache = make(map[int]string)
 		if m.persistHistory && m.historyStore != nil {
@@ -2635,13 +2676,73 @@ func (m Model) renderContextEditPopup() string {
 	return popupStyle.Render(contentStr)
 }
 
+// listVisibleItems returns the number of items that can fit in the history list view
+func (m Model) listVisibleItems() int {
+	// Account for header (2 lines: title + separator) and footer indicator
+	listHeight := m.height - 6 // status bar, tabs, header, margins
+	availableHeight := listHeight - 3
+	if availableHeight < 1 {
+		return 1
+	}
+	return availableHeight
+}
+
+// ensureSelectedVisible adjusts listScrollOffset to keep selected item visible
+func (m *Model) ensureSelectedVisible() {
+	if len(m.changes) == 0 {
+		return
+	}
+
+	totalItems := len(m.changes)
+	visibleItems := m.listVisibleItems()
+
+	// Convert selectedIndex to visual position (list is displayed in reverse)
+	// Visual position 0 = data index len-1, visual position N = data index len-1-N
+	// So: visualPos = totalItems - 1 - selectedIndex
+	visualPos := totalItems - 1 - m.selectedIndex
+
+	// If selected is above visible area (scrolled past), scroll up
+	if visualPos < m.listScrollOffset {
+		m.listScrollOffset = visualPos
+	}
+
+	// If selected is below visible area, scroll down
+	if visualPos >= m.listScrollOffset+visibleItems {
+		m.listScrollOffset = visualPos - visibleItems + 1
+	}
+
+	// Clamp scroll offset
+	maxOffset := totalItems - visibleItems
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.listScrollOffset > maxOffset {
+		m.listScrollOffset = maxOffset
+	}
+	if m.listScrollOffset < 0 {
+		m.listScrollOffset = 0
+	}
+}
+
 func (m Model) renderHistory() string {
 	if len(m.changes) == 0 {
 		return m.theme.Dim.Render("No changes yet...\nWaiting for Claude edits")
 	}
 
 	var sb strings.Builder
-	sb.WriteString(m.theme.Dim.Render(fmt.Sprintf("History (%d)\n", len(m.changes))))
+
+	// Calculate visible items (account for header: title + separator = 2 lines)
+	visibleItems := m.listVisibleItems()
+	totalItems := len(m.changes)
+
+	// Show scroll indicator in header if scrollable
+	if totalItems > visibleItems {
+		scrollInfo := fmt.Sprintf(" [%d-%d/%d]", m.listScrollOffset+1,
+			min(m.listScrollOffset+visibleItems, totalItems), totalItems)
+		sb.WriteString(m.theme.Dim.Render(fmt.Sprintf("History (%d)%s\n", totalItems, scrollInfo)))
+	} else {
+		sb.WriteString(m.theme.Dim.Render(fmt.Sprintf("History (%d)\n", totalItems)))
+	}
 	sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", 20)) + "\n")
 
 	// Calculate available width for path in history pane
@@ -2651,9 +2752,25 @@ func (m Model) renderHistory() string {
 	// Track current commit for grouping
 	currentCommit := ""
 
-	// Iterate in reverse to show newest on top
-	for i := len(m.changes) - 1; i >= 0; i-- {
+	// Display in reverse order: newest (highest index) first
+	// listScrollOffset is visual offset from top (0 = showing newest)
+	// Visual position 0 = data index len-1, visual position N = data index len-1-N
+	startVisual := m.listScrollOffset
+	endVisual := startVisual + visibleItems
+	if endVisual > totalItems {
+		endVisual = totalItems
+	}
+
+	// Iterate through visible items (newest first in display)
+	for visualPos := startVisual; visualPos < endVisual; visualPos++ {
+		// Convert visual position to data index (reverse mapping)
+		i := totalItems - 1 - visualPos
+		if i < 0 {
+			break
+		}
+
 		change := m.changes[i]
+
 		// Show commit header when commit changes
 		if change.CommitShort != "" && change.CommitShort != currentCommit {
 			currentCommit = change.CommitShort
@@ -2685,6 +2802,11 @@ func (m Model) renderHistory() string {
 				truncatePath(change.FilePath, pathWidth))
 			sb.WriteString(m.theme.Normal.Render("  "+line) + "\n")
 		}
+	}
+
+	// Show scroll indicator at bottom if there's more content
+	if m.listScrollOffset+visibleItems < totalItems {
+		sb.WriteString(m.theme.Dim.Render("  ↓ more...") + "\n")
 	}
 
 	return sb.String()
@@ -2817,21 +2939,31 @@ func (m *Model) renderDiff() string {
 		var err error
 		var source string
 
+		// Make file path absolute if it's relative
+		filePath := change.FilePath
+		if !filepath.IsAbs(filePath) {
+			if cwd, cwdErr := os.Getwd(); cwdErr == nil {
+				filePath = filepath.Join(cwd, filePath)
+			}
+		}
+
 		// Try VCS-based retrieval if we have commit info
 		if change.CommitSHA != "" && change.VCSType != "" {
-			// Get workspace root from file path directory
-			dir := filepath.Dir(change.FilePath)
-			if workspaceRoot, rootErr := vcs.GetWorkspaceRoot(dir, change.VCSType); rootErr == nil {
-				fileContent, err = vcs.GetFileAtCommit(workspaceRoot, change.FilePath, change.CommitSHA, change.VCSType)
-				if err == nil {
-					source = fmt.Sprintf("VCS (%s@%s)", change.VCSType, change.CommitSHA[:min(8, len(change.CommitSHA))])
+			// Get workspace root from current directory (more reliable than file path)
+			cwd, cwdErr := os.Getwd()
+			if cwdErr == nil {
+				if workspaceRoot, rootErr := vcs.GetWorkspaceRoot(cwd, change.VCSType); rootErr == nil {
+					fileContent, err = vcs.GetFileAtCommit(workspaceRoot, filePath, change.CommitSHA, change.VCSType)
+					if err == nil {
+						source = fmt.Sprintf("VCS (%s@%s)", change.VCSType, change.CommitSHA[:min(8, len(change.CommitSHA))])
+					}
 				}
 			}
 		}
 
 		// Fall back to reading current file if VCS retrieval failed
 		if fileContent == "" {
-			if content, readErr := os.ReadFile(change.FilePath); readErr == nil {
+			if content, readErr := os.ReadFile(filePath); readErr == nil {
 				fileContent = string(content)
 				source = "current file"
 			} else {
