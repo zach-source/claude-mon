@@ -180,9 +180,25 @@ type Model struct {
 	contextSelected  int                   // Selected context in list view
 	contextShowList  bool                  // Whether to show all contexts list
 	contextEditMode  bool                  // Whether editing context values
-	contextEditField string                // Which field is being edited
-	contextEditInput textinput.Model       // Edit input field
-	contextViewport  viewport.Model        // For scrolling context list
+	contextEditField string                // Which context type: k8s, aws, git, env, custom
+	contextViewport  viewport.Model
+
+	// Multi-field inputs for context editing
+	k8sKubeconfigInput textinput.Model // Kubeconfig file path
+	k8sContextInput    textinput.Model // Context name
+	k8sNamespaceInput  textinput.Model // Namespace
+	k8sFocusedField    int             // 0=kubeconfig, 1=context, 2=namespace
+
+	gitBranchInput  textinput.Model // Branch name
+	gitRepoInput    textinput.Model // Repository name
+	gitFocusedField int             // 0=branch, 1=repo
+
+	awsProfileInput textinput.Model // AWS profile
+	awsRegionInput  textinput.Model // AWS region
+	awsFocusedField int             // 0=profile, 1=region
+
+	envInput    textinput.Model // KEY=VALUE for env
+	customInput textinput.Model // KEY=VALUE for custom
 
 	// Context completion (in-app fuzzy search)
 	contextCompletionActive     bool            // Whether completion overlay is showing
@@ -190,11 +206,6 @@ type Model struct {
 	contextCompletionCandidates []string        // All candidates for current field
 	contextCompletionMatches    []int           // Indices of matching candidates
 	contextCompletionSelected   int             // Currently selected match index
-
-	// K8s multi-step completion state
-	k8sCompletionStep     int    // 0=kubeconfig, 1=context, 2=namespace
-	k8sSelectedKubeconfig string // Selected kubeconfig path
-	k8sSelectedContext    string // Selected context name
 
 	// Layout
 	hideLeftPane bool // Toggle left pane visibility
@@ -366,12 +377,54 @@ func New(socketPath string, opts ...Option) Model {
 		m.contextCurrent = workingctx.New()
 	}
 
-	// Initialize context edit input
-	ctxTi := textinput.New()
-	ctxTi.Placeholder = "Enter value..."
-	ctxTi.CharLimit = 200
-	ctxTi.Width = 40
-	m.contextEditInput = ctxTi
+	// Initialize k8s inputs
+	m.k8sKubeconfigInput = textinput.New()
+	m.k8sKubeconfigInput.Placeholder = "~/.kube/config"
+	m.k8sKubeconfigInput.CharLimit = 200
+	m.k8sKubeconfigInput.Width = 40
+
+	m.k8sContextInput = textinput.New()
+	m.k8sContextInput.Placeholder = "context name"
+	m.k8sContextInput.CharLimit = 100
+	m.k8sContextInput.Width = 40
+
+	m.k8sNamespaceInput = textinput.New()
+	m.k8sNamespaceInput.Placeholder = "default"
+	m.k8sNamespaceInput.CharLimit = 100
+	m.k8sNamespaceInput.Width = 40
+
+	// Initialize git inputs
+	m.gitBranchInput = textinput.New()
+	m.gitBranchInput.Placeholder = "branch name"
+	m.gitBranchInput.CharLimit = 100
+	m.gitBranchInput.Width = 40
+
+	m.gitRepoInput = textinput.New()
+	m.gitRepoInput.Placeholder = "repository (auto-detected)"
+	m.gitRepoInput.CharLimit = 200
+	m.gitRepoInput.Width = 40
+
+	// Initialize aws inputs
+	m.awsProfileInput = textinput.New()
+	m.awsProfileInput.Placeholder = "profile name"
+	m.awsProfileInput.CharLimit = 100
+	m.awsProfileInput.Width = 40
+
+	m.awsRegionInput = textinput.New()
+	m.awsRegionInput.Placeholder = "us-east-1"
+	m.awsRegionInput.CharLimit = 50
+	m.awsRegionInput.Width = 40
+
+	// Initialize env/custom inputs
+	m.envInput = textinput.New()
+	m.envInput.Placeholder = `KEY="value with spaces"`
+	m.envInput.CharLimit = 200
+	m.envInput.Width = 40
+
+	m.customInput = textinput.New()
+	m.customInput.Placeholder = `KEY="value"`
+	m.customInput.CharLimit = 200
+	m.customInput.Width = 40
 
 	// Initialize context completion input
 	compTi := textinput.New()
@@ -738,159 +791,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.contextEditMode {
 			switch key {
 			case "enter":
-				// Save the edited value
-				value := m.contextEditInput.Value()
-				if value != "" {
-					m.contextEditMode = false
-					m.contextEditInput.Reset()
-
-					// Apply the change based on which field is being edited
-					if m.contextCurrent != nil {
-						switch m.contextEditField {
-						case "k8s":
-							// Parse: context [namespace] [--kubeconfig path]
-							parts := strings.Fields(value)
-							if len(parts) > 0 {
-								k8sCtx := parts[0]
-								namespace := ""
-								kubeconfig := ""
-								for i := 1; i < len(parts); i++ {
-									if parts[i] == "--kubeconfig" && i+1 < len(parts) {
-										kubeconfig = parts[i+1]
-										i++
-									} else if namespace == "" {
-										namespace = parts[i]
-									}
-								}
-								m.contextCurrent.SetKubernetes(k8sCtx, namespace, kubeconfig)
-							}
-						case "aws":
-							// Parse: profile [region]
-							parts := strings.Fields(value)
-							if len(parts) > 0 {
-								profile := parts[0]
-								region := ""
-								if len(parts) > 1 {
-									region = parts[1]
-								}
-								m.contextCurrent.SetAWS(profile, region)
-							}
-						case "git":
-							// Parse: [branch] [repo]
-							parts := strings.Fields(value)
-							branch := ""
-							repo := ""
-							if len(parts) > 0 {
-								branch = parts[0]
-							}
-							if len(parts) > 1 {
-								repo = parts[1]
-							}
-							m.contextCurrent.SetGit(branch, repo)
-						case "env":
-							// Parse: KEY=VALUE with quote support, merge into existing
-							// Supports: KEY=value, KEY="value with spaces", KEY='quoted'
-							if k, v, ok := parseKeyValue(value); ok {
-								envVars := m.contextCurrent.GetEnv()
-								if envVars == nil {
-									envVars = make(map[string]string)
-								}
-								envVars[k] = v
-								m.contextCurrent.SetEnv(envVars)
-							}
-						case "custom":
-							// Parse: KEY=VALUE with quote support, merge into existing
-							// Supports: KEY=value, KEY="value with spaces", KEY='quoted'
-							if k, v, ok := parseKeyValue(value); ok {
-								customVars := m.contextCurrent.GetCustom()
-								if customVars == nil {
-									customVars = make(map[string]string)
-								}
-								customVars[k] = v
-								m.contextCurrent.SetCustom(customVars)
-							}
-						}
-
-						// Save the context
-						if err := m.contextCurrent.Save(); err != nil {
-							m.addToast(fmt.Sprintf("Failed to save context: %v", err), ToastError)
-							return m, nil
-						}
-
-						// Set context using Claude CLI with /command format
-						var cmdStr string
-						switch m.contextEditField {
-						case "k8s":
-							k8s := m.contextCurrent.GetKubernetes()
-							if k8s != nil {
-								cmdStr = fmt.Sprintf("/k8s %s", k8s.Context)
-								if k8s.Namespace != "" {
-									cmdStr += " " + k8s.Namespace
-								}
-								if k8s.Kubeconfig != "" {
-									cmdStr += " --kubeconfig " + k8s.Kubeconfig
-								}
-							}
-						case "aws":
-							aws := m.contextCurrent.GetAWS()
-							if aws != nil {
-								cmdStr = fmt.Sprintf("/aws %s", aws.Profile)
-								if aws.Region != "" {
-									cmdStr += " " + aws.Region
-								}
-							}
-						case "git":
-							git := m.contextCurrent.GetGit()
-							if git != nil {
-								cmdStr = "/git"
-								if git.Branch != "" {
-									cmdStr += " " + git.Branch
-								}
-								if git.Repo != "" {
-									cmdStr += " " + git.Repo
-								}
-							}
-						case "env":
-							env := m.contextCurrent.GetEnv()
-							if env != nil && len(env) > 0 {
-								var parts []string
-								for k, v := range env {
-									parts = append(parts, fmt.Sprintf("%s=%s", k, v))
-								}
-								cmdStr = "/env " + strings.Join(parts, " ")
-							}
-						case "custom":
-							custom := m.contextCurrent.GetCustom()
-							if custom != nil && len(custom) > 0 {
-								var parts []string
-								for k, v := range custom {
-									parts = append(parts, fmt.Sprintf("%s=%s", k, v))
-								}
-								cmdStr = "/custom " + strings.Join(parts, " ")
-							}
-						}
-
-						if cmdStr != "" {
-							// Run claude CLI with /command
-							cmd := exec.Command("claude", "-p", cmdStr, "--mcp", "{}")
-							cmd.Env = append(os.Environ(), "CLAUDE_CODE_ENTRYPOINT=cli")
-
-							// Execute command asynchronously
-							return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-								if err != nil {
-									logger.Log("Failed to set context via CLI: %v", err)
-									m.addToast("Saved locally, CLI sync failed", ToastWarning)
-								} else {
-									logger.Log("Context set via Claude CLI: %s", cmdStr)
-									m.addToast("Context updated", ToastSuccess)
-								}
-								return nil
-							})
-						}
-
-						m.addToast("Context updated", ToastSuccess)
-					}
-				}
+				// Save the edited value based on context type
+				m.saveContextEdit()
+				m.contextEditMode = false
 				return m, nil
 			case "esc":
 				// If completion is active, close it first
@@ -898,32 +801,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.contextCompletionActive = false
 					m.contextCompletionInput.Reset()
 					m.contextCompletionInput.Blur()
-					// Reset k8s state
-					m.k8sCompletionStep = 0
-					m.k8sSelectedKubeconfig = ""
-					m.k8sSelectedContext = ""
 					return m, nil
 				}
 				// Cancel editing
 				m.contextEditMode = false
 				m.contextEditField = ""
-				m.contextEditInput.Reset()
 				return m, nil
 			case "tab":
-				// Toggle completion overlay
+				// Move to next field or toggle completion
 				if m.contextCompletionActive {
-					// Close completion and reset k8s state
 					m.contextCompletionActive = false
 					m.contextCompletionInput.Reset()
 					m.contextCompletionInput.Blur()
-					m.k8sCompletionStep = 0
-					m.k8sSelectedKubeconfig = ""
-					m.k8sSelectedContext = ""
 				} else {
-					// Open completion - reset k8s state and load candidates
-					m.k8sCompletionStep = 0
-					m.k8sSelectedKubeconfig = ""
-					m.k8sSelectedContext = ""
+					// Move to next field
+					m.nextContextField()
+				}
+				return m, nil
+			case "shift+tab":
+				// Move to previous field
+				m.prevContextField()
+				return m, nil
+			case "ctrl+space":
+				// Open completion for current field
+				if !m.contextCompletionActive {
 					m.loadContextCompletions()
 					m.contextCompletionActive = true
 					m.contextCompletionInput.Reset()
@@ -944,78 +845,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.contextCompletionSelected++
 						}
 						return m, nil
-					case "enter":
-						// Select the completion
-						if len(m.contextCompletionMatches) > 0 && m.contextCompletionSelected < len(m.contextCompletionMatches) {
-							idx := m.contextCompletionMatches[m.contextCompletionSelected]
-							selected := m.contextCompletionCandidates[idx]
-
-							// Handle k8s multi-step completion
-							if m.contextEditField == "k8s" {
-								switch m.k8sCompletionStep {
-								case 0:
-									// Selected kubeconfig, advance to context selection
-									m.k8sSelectedKubeconfig = selected
-									m.k8sCompletionStep = 1
-									m.contextCompletionInput.Reset()
-									m.loadContextCompletions()
-									return m, nil
-								case 1:
-									// Selected context, advance to namespace selection
-									m.k8sSelectedContext = selected
-									m.k8sCompletionStep = 2
-									m.contextCompletionInput.Reset()
-									m.loadContextCompletions()
-									return m, nil
-								case 2:
-									// Selected namespace, build final value
-									home, _ := os.UserHomeDir()
-									defaultConfig := filepath.Join(home, ".kube", "config")
-
-									var finalValue string
-									if m.k8sSelectedKubeconfig == defaultConfig {
-										// Default kubeconfig, just context and namespace
-										finalValue = m.k8sSelectedContext + " " + selected
-									} else {
-										// Custom kubeconfig
-										finalValue = m.k8sSelectedContext + " " + selected + " --kubeconfig " + m.k8sSelectedKubeconfig
-									}
-
-									m.contextEditInput.SetValue(finalValue)
-									m.contextEditInput.CursorEnd()
-									// Reset k8s state
-									m.k8sCompletionStep = 0
-									m.k8sSelectedKubeconfig = ""
-									m.k8sSelectedContext = ""
-								}
-							} else {
-								// Non-k8s field: just set the value
-								m.contextEditInput.SetValue(selected)
-								m.contextEditInput.CursorEnd()
+					default:
+						// Check if this is Enter to select completion
+						if key == "enter" {
+							if len(m.contextCompletionMatches) > 0 && m.contextCompletionSelected < len(m.contextCompletionMatches) {
+								idx := m.contextCompletionMatches[m.contextCompletionSelected]
+								selected := m.contextCompletionCandidates[idx]
+								m.setCurrentContextFieldValue(selected)
 							}
-
 							m.contextCompletionActive = false
 							m.contextCompletionInput.Reset()
 							m.contextCompletionInput.Blur()
+							return m, nil
 						}
-						return m, nil
-					default:
 						// Forward to completion filter input
 						var cmd tea.Cmd
 						m.contextCompletionInput, cmd = m.contextCompletionInput.Update(msg)
-						// Recompute matches based on filter
 						m.computeContextCompletionMatches(m.contextCompletionInput.Value())
-						// Reset selection if it's out of bounds
 						if m.contextCompletionSelected >= len(m.contextCompletionMatches) {
 							m.contextCompletionSelected = 0
 						}
 						return m, cmd
 					}
 				}
-				// Forward to textinput
-				var cmd tea.Cmd
-				m.contextEditInput, cmd = m.contextEditInput.Update(msg)
-				return m, cmd
+				// Forward to current focused input
+				return m.updateCurrentContextInput(msg)
 			}
 		}
 
@@ -2072,44 +1926,69 @@ func (m Model) handleLeaderKeyPlan(key string) (tea.Model, tea.Cmd) {
 func (m Model) handleLeaderKeyContext(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "k":
-		// Set Kubernetes context using /k8s command
+		// Set Kubernetes context - multi-field: kubeconfig, context, namespace
 		m.contextEditMode = true
 		m.contextEditField = "k8s"
-		m.contextEditInput.Placeholder = "context [namespace] [--kubeconfig path]"
-		m.contextEditInput.Reset()
-		m.contextEditInput.Focus()
+		m.k8sFocusedField = 0 // Start at kubeconfig
+		// Pre-fill from current context
+		if k8s := m.contextCurrent.GetKubernetes(); k8s != nil {
+			m.k8sKubeconfigInput.SetValue(k8s.Kubeconfig)
+			m.k8sContextInput.SetValue(k8s.Context)
+			m.k8sNamespaceInput.SetValue(k8s.Namespace)
+		} else {
+			m.k8sKubeconfigInput.Reset()
+			m.k8sContextInput.Reset()
+			m.k8sNamespaceInput.Reset()
+		}
+		m.k8sKubeconfigInput.Focus()
+		m.k8sContextInput.Blur()
+		m.k8sNamespaceInput.Blur()
 		return m, textinput.Blink
 	case "a":
-		// Set AWS profile using /aws command
+		// Set AWS profile - multi-field: profile, region
 		m.contextEditMode = true
 		m.contextEditField = "aws"
-		m.contextEditInput.Placeholder = "profile [region]"
-		m.contextEditInput.Reset()
-		m.contextEditInput.Focus()
+		m.awsFocusedField = 0 // Start at profile
+		// Pre-fill from current context
+		if aws := m.contextCurrent.GetAWS(); aws != nil {
+			m.awsProfileInput.SetValue(aws.Profile)
+			m.awsRegionInput.SetValue(aws.Region)
+		} else {
+			m.awsProfileInput.Reset()
+			m.awsRegionInput.Reset()
+		}
+		m.awsProfileInput.Focus()
+		m.awsRegionInput.Blur()
 		return m, textinput.Blink
 	case "g":
-		// Set Git info using /git command
+		// Set Git info - multi-field: branch, repo
 		m.contextEditMode = true
 		m.contextEditField = "git"
-		m.contextEditInput.Placeholder = "[branch] [repo] (auto-detects if empty)"
-		m.contextEditInput.Reset()
-		m.contextEditInput.Focus()
+		m.gitFocusedField = 0 // Start at branch
+		// Pre-fill from current context
+		if git := m.contextCurrent.GetGit(); git != nil {
+			m.gitBranchInput.SetValue(git.Branch)
+			m.gitRepoInput.SetValue(git.Repo)
+		} else {
+			m.gitBranchInput.Reset()
+			m.gitRepoInput.Reset()
+		}
+		m.gitBranchInput.Focus()
+		m.gitRepoInput.Blur()
 		return m, textinput.Blink
 	case "e":
-		// Set environment variables using /env command
+		// Set environment variables - single KEY=VALUE field
 		m.contextEditMode = true
 		m.contextEditField = "env"
-		m.contextEditInput.Placeholder = "KEY=VALUE [KEY2=VALUE2...]"
-		m.contextEditInput.Reset()
-		m.contextEditInput.Focus()
+		m.envInput.Reset()
+		m.envInput.Focus()
 		return m, textinput.Blink
 	case "c":
-		// Set custom values using /custom command
+		// Set custom values - single KEY=VALUE field
 		m.contextEditMode = true
 		m.contextEditField = "custom"
-		m.contextEditInput.Placeholder = "KEY=VALUE [KEY2=VALUE2...]"
-		m.contextEditInput.Reset()
-		m.contextEditInput.Focus()
+		m.customInput.Reset()
+		m.customInput.Focus()
 		return m, textinput.Blink
 	case "C":
 		// Clear all context
@@ -2812,52 +2691,108 @@ func (m Model) renderContextEditPopup() string {
 		return ""
 	}
 
-	// Title based on field type
-	var title string
-	var placeholder string
+	var content strings.Builder
+
+	// Render based on context type
 	switch m.contextEditField {
 	case "k8s":
-		title = "Set Kubernetes Context"
-		placeholder = "context [namespace] [--kubeconfig path]"
-	case "aws":
-		title = "Set AWS Profile"
-		placeholder = "profile [region]"
-	case "git":
-		title = "Set Git Info"
-		placeholder = "[branch] [repo] (auto-detects if empty)"
-	case "env":
-		title = "Set Environment Variables"
-		placeholder = "KEY=VALUE [KEY2=VALUE2...]"
-	case "custom":
-		title = "Set Custom Values"
-		placeholder = "KEY=VALUE [KEY2=VALUE2...]"
-	default:
-		title = "Set Context Value"
-		placeholder = "Enter value..."
-	}
+		content.WriteString(m.theme.Title.Render("⚙️ Kubernetes Context") + "\n")
+		content.WriteString(m.theme.Dim.Render(strings.Repeat("─", 50)) + "\n\n")
 
-	// Build popup content
-	var content strings.Builder
-	content.WriteString(m.theme.Title.Render(title) + "\n")
-	content.WriteString(m.theme.Dim.Render(strings.Repeat("─", 50)) + "\n\n")
-	content.WriteString(m.theme.Normal.Render(placeholder) + "\n\n")
-	content.WriteString(m.contextEditInput.View() + "\n\n")
+		// Kubeconfig field
+		label := "Kubeconfig:"
+		if m.k8sFocusedField == 0 {
+			label = m.theme.Selected.Render("> " + label)
+		} else {
+			label = m.theme.Dim.Render("  " + label)
+		}
+		content.WriteString(label + "\n")
+		content.WriteString("  " + m.k8sKubeconfigInput.View() + "\n\n")
+
+		// Context field
+		label = "Context:"
+		if m.k8sFocusedField == 1 {
+			label = m.theme.Selected.Render("> " + label)
+		} else {
+			label = m.theme.Dim.Render("  " + label)
+		}
+		content.WriteString(label + "\n")
+		content.WriteString("  " + m.k8sContextInput.View() + "\n\n")
+
+		// Namespace field
+		label = "Namespace:"
+		if m.k8sFocusedField == 2 {
+			label = m.theme.Selected.Render("> " + label)
+		} else {
+			label = m.theme.Dim.Render("  " + label)
+		}
+		content.WriteString(label + "\n")
+		content.WriteString("  " + m.k8sNamespaceInput.View() + "\n")
+
+	case "aws":
+		content.WriteString(m.theme.Title.Render("⛅️ AWS Profile") + "\n")
+		content.WriteString(m.theme.Dim.Render(strings.Repeat("─", 50)) + "\n\n")
+
+		// Profile field
+		label := "Profile:"
+		if m.awsFocusedField == 0 {
+			label = m.theme.Selected.Render("> " + label)
+		} else {
+			label = m.theme.Dim.Render("  " + label)
+		}
+		content.WriteString(label + "\n")
+		content.WriteString("  " + m.awsProfileInput.View() + "\n\n")
+
+		// Region field
+		label = "Region:"
+		if m.awsFocusedField == 1 {
+			label = m.theme.Selected.Render("> " + label)
+		} else {
+			label = m.theme.Dim.Render("  " + label)
+		}
+		content.WriteString(label + "\n")
+		content.WriteString("  " + m.awsRegionInput.View() + "\n")
+
+	case "git":
+		content.WriteString(m.theme.Title.Render("🌿 Git Info") + "\n")
+		content.WriteString(m.theme.Dim.Render(strings.Repeat("─", 50)) + "\n\n")
+
+		// Branch field
+		label := "Branch:"
+		if m.gitFocusedField == 0 {
+			label = m.theme.Selected.Render("> " + label)
+		} else {
+			label = m.theme.Dim.Render("  " + label)
+		}
+		content.WriteString(label + "\n")
+		content.WriteString("  " + m.gitBranchInput.View() + "\n\n")
+
+		// Repo field
+		label = "Repository:"
+		if m.gitFocusedField == 1 {
+			label = m.theme.Selected.Render("> " + label)
+		} else {
+			label = m.theme.Dim.Render("  " + label)
+		}
+		content.WriteString(label + "\n")
+		content.WriteString("  " + m.gitRepoInput.View() + "\n")
+
+	case "env":
+		content.WriteString(m.theme.Title.Render("📦 Environment Variable") + "\n")
+		content.WriteString(m.theme.Dim.Render(strings.Repeat("─", 50)) + "\n\n")
+		content.WriteString(m.theme.Dim.Render("Format: KEY=value or KEY=\"value with spaces\"") + "\n\n")
+		content.WriteString(m.envInput.View() + "\n")
+
+	case "custom":
+		content.WriteString(m.theme.Title.Render("🔧 Custom Value") + "\n")
+		content.WriteString(m.theme.Dim.Render(strings.Repeat("─", 50)) + "\n\n")
+		content.WriteString(m.theme.Dim.Render("Format: KEY=value or KEY=\"value with spaces\"") + "\n\n")
+		content.WriteString(m.customInput.View() + "\n")
+	}
 
 	// Show completion overlay if active
 	if m.contextCompletionActive {
-		// Show step indicator for k8s
-		if m.contextEditField == "k8s" {
-			stepLabels := []string{"① Kubeconfig", "② Context", "③ Namespace"}
-			stepIndicator := stepLabels[m.k8sCompletionStep]
-			if m.k8sSelectedKubeconfig != "" {
-				// Show selected kubeconfig (basename only)
-				stepIndicator += " • " + filepath.Base(m.k8sSelectedKubeconfig)
-			}
-			if m.k8sSelectedContext != "" {
-				stepIndicator += " → " + m.k8sSelectedContext
-			}
-			content.WriteString(m.theme.Title.Render(stepIndicator) + "\n")
-		}
+		content.WriteString("\n")
 		content.WriteString(m.theme.Dim.Render("─── Completions ───") + "\n")
 		content.WriteString(m.contextCompletionInput.View() + "\n\n")
 
@@ -2891,9 +2826,10 @@ func (m Model) renderContextEditPopup() string {
 		}
 
 		content.WriteString("\n")
-		content.WriteString(m.theme.Dim.Render("↑/↓:navigate  Enter:select  Tab/Esc:close"))
+		content.WriteString(m.theme.Dim.Render("↑/↓:navigate  Enter:select  Esc:close"))
 	} else {
-		content.WriteString(m.theme.Dim.Render("Tab:autocomplete  Enter:save  Esc:cancel"))
+		content.WriteString("\n")
+		content.WriteString(m.theme.Dim.Render("Tab:next field  Ctrl+Space:autocomplete  Enter:save  Esc:cancel"))
 	}
 
 	// Wrap content in a bordered box
@@ -2910,23 +2846,48 @@ func (m Model) renderContextEditPopup() string {
 	return popupStyle.Render(contentStr)
 }
 
-// loadContextCompletions loads completion candidates for the current context field
+// loadContextCompletions loads completion candidates for the current focused field
 func (m *Model) loadContextCompletions() {
 	switch m.contextEditField {
 	case "k8s":
-		// Multi-step: kubeconfig -> context -> namespace
-		switch m.k8sCompletionStep {
-		case 0:
+		// Load completions based on which field is focused
+		switch m.k8sFocusedField {
+		case 0: // kubeconfig
 			m.contextCompletionCandidates = loadK8sKubeconfigs()
-		case 1:
-			m.contextCompletionCandidates = loadK8sContexts(m.k8sSelectedKubeconfig)
-		case 2:
-			m.contextCompletionCandidates = loadK8sNamespaces(m.k8sSelectedKubeconfig, m.k8sSelectedContext)
+		case 1: // context
+			// Use kubeconfig from input to find contexts
+			kubeconfig := m.k8sKubeconfigInput.Value()
+			if kubeconfig == "" {
+				home, _ := os.UserHomeDir()
+				kubeconfig = filepath.Join(home, ".kube", "config")
+			}
+			m.contextCompletionCandidates = loadK8sContexts(kubeconfig)
+		case 2: // namespace
+			// Use kubeconfig and context from inputs
+			kubeconfig := m.k8sKubeconfigInput.Value()
+			if kubeconfig == "" {
+				home, _ := os.UserHomeDir()
+				kubeconfig = filepath.Join(home, ".kube", "config")
+			}
+			context := m.k8sContextInput.Value()
+			m.contextCompletionCandidates = loadK8sNamespaces(kubeconfig, context)
 		}
 	case "aws":
-		m.contextCompletionCandidates = loadAWSCompletions()
+		// Load completions based on which field is focused
+		switch m.awsFocusedField {
+		case 0: // profile
+			m.contextCompletionCandidates = loadAWSProfiles()
+		case 1: // region
+			m.contextCompletionCandidates = loadAWSRegions()
+		}
 	case "git":
-		m.contextCompletionCandidates = loadGitCompletions()
+		// Load completions based on which field is focused
+		switch m.gitFocusedField {
+		case 0: // branch
+			m.contextCompletionCandidates = loadGitBranches()
+		case 1: // repo
+			m.contextCompletionCandidates = loadGitRepos()
+		}
 	case "env":
 		m.contextCompletionCandidates = loadEnvCompletions()
 	case "custom":
@@ -3273,6 +3234,270 @@ func loadCustomCompletions(ctx *workingctx.Context) []string {
 	}
 
 	return results
+}
+
+// loadAWSProfiles returns AWS profiles (alias for loadAWSCompletions)
+func loadAWSProfiles() []string {
+	return loadAWSCompletions()
+}
+
+// loadAWSRegions returns common AWS regions
+func loadAWSRegions() []string {
+	return []string{
+		"us-east-1",
+		"us-east-2",
+		"us-west-1",
+		"us-west-2",
+		"eu-west-1",
+		"eu-west-2",
+		"eu-central-1",
+		"ap-northeast-1",
+		"ap-southeast-1",
+		"ap-southeast-2",
+		"ap-south-1",
+		"sa-east-1",
+		"ca-central-1",
+	}
+}
+
+// loadGitBranches returns git branches (alias for loadGitCompletions)
+func loadGitBranches() []string {
+	return loadGitCompletions()
+}
+
+// loadGitRepos returns git repository suggestions from recent history
+func loadGitRepos() []string {
+	var results []string
+
+	// Get current repo remote
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	output, err := cmd.Output()
+	if err == nil {
+		repo := strings.TrimSpace(string(output))
+		if repo != "" {
+			results = append(results, repo)
+		}
+	}
+
+	// Try to get other remotes
+	cmd = exec.Command("git", "remote", "-v")
+	output, err = cmd.Output()
+	if err == nil {
+		seen := make(map[string]bool)
+		for _, line := range strings.Split(string(output), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				repo := fields[1]
+				if !seen[repo] {
+					seen[repo] = true
+					results = append(results, repo)
+				}
+			}
+		}
+	}
+
+	return results
+}
+
+// nextContextField moves focus to the next input field
+func (m *Model) nextContextField() {
+	switch m.contextEditField {
+	case "k8s":
+		m.k8sKubeconfigInput.Blur()
+		m.k8sContextInput.Blur()
+		m.k8sNamespaceInput.Blur()
+		m.k8sFocusedField = (m.k8sFocusedField + 1) % 3
+		switch m.k8sFocusedField {
+		case 0:
+			m.k8sKubeconfigInput.Focus()
+		case 1:
+			m.k8sContextInput.Focus()
+		case 2:
+			m.k8sNamespaceInput.Focus()
+		}
+	case "aws":
+		m.awsProfileInput.Blur()
+		m.awsRegionInput.Blur()
+		m.awsFocusedField = (m.awsFocusedField + 1) % 2
+		switch m.awsFocusedField {
+		case 0:
+			m.awsProfileInput.Focus()
+		case 1:
+			m.awsRegionInput.Focus()
+		}
+	case "git":
+		m.gitBranchInput.Blur()
+		m.gitRepoInput.Blur()
+		m.gitFocusedField = (m.gitFocusedField + 1) % 2
+		switch m.gitFocusedField {
+		case 0:
+			m.gitBranchInput.Focus()
+		case 1:
+			m.gitRepoInput.Focus()
+		}
+	}
+}
+
+// prevContextField moves focus to the previous input field
+func (m *Model) prevContextField() {
+	switch m.contextEditField {
+	case "k8s":
+		m.k8sKubeconfigInput.Blur()
+		m.k8sContextInput.Blur()
+		m.k8sNamespaceInput.Blur()
+		m.k8sFocusedField = (m.k8sFocusedField + 2) % 3 // +2 to go backwards
+		switch m.k8sFocusedField {
+		case 0:
+			m.k8sKubeconfigInput.Focus()
+		case 1:
+			m.k8sContextInput.Focus()
+		case 2:
+			m.k8sNamespaceInput.Focus()
+		}
+	case "aws":
+		m.awsProfileInput.Blur()
+		m.awsRegionInput.Blur()
+		m.awsFocusedField = (m.awsFocusedField + 1) % 2 // +1 is same as -1 for mod 2
+		switch m.awsFocusedField {
+		case 0:
+			m.awsProfileInput.Focus()
+		case 1:
+			m.awsRegionInput.Focus()
+		}
+	case "git":
+		m.gitBranchInput.Blur()
+		m.gitRepoInput.Blur()
+		m.gitFocusedField = (m.gitFocusedField + 1) % 2
+		switch m.gitFocusedField {
+		case 0:
+			m.gitBranchInput.Focus()
+		case 1:
+			m.gitRepoInput.Focus()
+		}
+	}
+}
+
+// setCurrentContextFieldValue sets the value of the currently focused field
+func (m *Model) setCurrentContextFieldValue(value string) {
+	switch m.contextEditField {
+	case "k8s":
+		switch m.k8sFocusedField {
+		case 0:
+			m.k8sKubeconfigInput.SetValue(value)
+		case 1:
+			m.k8sContextInput.SetValue(value)
+		case 2:
+			m.k8sNamespaceInput.SetValue(value)
+		}
+	case "aws":
+		switch m.awsFocusedField {
+		case 0:
+			m.awsProfileInput.SetValue(value)
+		case 1:
+			m.awsRegionInput.SetValue(value)
+		}
+	case "git":
+		switch m.gitFocusedField {
+		case 0:
+			m.gitBranchInput.SetValue(value)
+		case 1:
+			m.gitRepoInput.SetValue(value)
+		}
+	case "env":
+		m.envInput.SetValue(value)
+	case "custom":
+		m.customInput.SetValue(value)
+	}
+}
+
+// updateCurrentContextInput forwards a message to the currently focused input
+func (m Model) updateCurrentContextInput(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch m.contextEditField {
+	case "k8s":
+		switch m.k8sFocusedField {
+		case 0:
+			m.k8sKubeconfigInput, cmd = m.k8sKubeconfigInput.Update(msg)
+		case 1:
+			m.k8sContextInput, cmd = m.k8sContextInput.Update(msg)
+		case 2:
+			m.k8sNamespaceInput, cmd = m.k8sNamespaceInput.Update(msg)
+		}
+	case "aws":
+		switch m.awsFocusedField {
+		case 0:
+			m.awsProfileInput, cmd = m.awsProfileInput.Update(msg)
+		case 1:
+			m.awsRegionInput, cmd = m.awsRegionInput.Update(msg)
+		}
+	case "git":
+		switch m.gitFocusedField {
+		case 0:
+			m.gitBranchInput, cmd = m.gitBranchInput.Update(msg)
+		case 1:
+			m.gitRepoInput, cmd = m.gitRepoInput.Update(msg)
+		}
+	case "env":
+		m.envInput, cmd = m.envInput.Update(msg)
+	case "custom":
+		m.customInput, cmd = m.customInput.Update(msg)
+	}
+	return m, cmd
+}
+
+// saveContextEdit saves the context from the multi-field inputs
+func (m *Model) saveContextEdit() {
+	if m.contextCurrent == nil {
+		return
+	}
+
+	switch m.contextEditField {
+	case "k8s":
+		kubeconfig := m.k8sKubeconfigInput.Value()
+		context := m.k8sContextInput.Value()
+		namespace := m.k8sNamespaceInput.Value()
+		m.contextCurrent.SetKubernetes(context, namespace, kubeconfig)
+
+	case "aws":
+		profile := m.awsProfileInput.Value()
+		region := m.awsRegionInput.Value()
+		m.contextCurrent.SetAWS(profile, region)
+
+	case "git":
+		branch := m.gitBranchInput.Value()
+		repo := m.gitRepoInput.Value()
+		m.contextCurrent.SetGit(branch, repo)
+
+	case "env":
+		value := m.envInput.Value()
+		if k, v, ok := parseKeyValue(value); ok {
+			envVars := m.contextCurrent.GetEnv()
+			if envVars == nil {
+				envVars = make(map[string]string)
+			}
+			envVars[k] = v
+			m.contextCurrent.SetEnv(envVars)
+		}
+
+	case "custom":
+		value := m.customInput.Value()
+		if k, v, ok := parseKeyValue(value); ok {
+			customVars := m.contextCurrent.GetCustom()
+			if customVars == nil {
+				customVars = make(map[string]string)
+			}
+			customVars[k] = v
+			m.contextCurrent.SetCustom(customVars)
+		}
+	}
+
+	// Save the context
+	if err := m.contextCurrent.Save(); err != nil {
+		m.addToast(fmt.Sprintf("Failed to save context: %v", err), ToastError)
+		return
+	}
+
+	m.addToast("Context updated", ToastSuccess)
 }
 
 // listVisibleItems returns the number of items that can fit in the history list view
