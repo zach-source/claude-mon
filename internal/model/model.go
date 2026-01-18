@@ -191,6 +191,11 @@ type Model struct {
 	contextCompletionMatches    []int           // Indices of matching candidates
 	contextCompletionSelected   int             // Currently selected match index
 
+	// K8s multi-step completion state
+	k8sCompletionStep     int    // 0=kubeconfig, 1=context, 2=namespace
+	k8sSelectedKubeconfig string // Selected kubeconfig path
+	k8sSelectedContext    string // Selected context name
+
 	// Layout
 	hideLeftPane bool // Toggle left pane visibility
 
@@ -893,6 +898,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.contextCompletionActive = false
 					m.contextCompletionInput.Reset()
 					m.contextCompletionInput.Blur()
+					// Reset k8s state
+					m.k8sCompletionStep = 0
+					m.k8sSelectedKubeconfig = ""
+					m.k8sSelectedContext = ""
 					return m, nil
 				}
 				// Cancel editing
@@ -903,12 +912,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "tab":
 				// Toggle completion overlay
 				if m.contextCompletionActive {
-					// Close completion
+					// Close completion and reset k8s state
 					m.contextCompletionActive = false
 					m.contextCompletionInput.Reset()
 					m.contextCompletionInput.Blur()
+					m.k8sCompletionStep = 0
+					m.k8sSelectedKubeconfig = ""
+					m.k8sSelectedContext = ""
 				} else {
-					// Open completion - load candidates and show overlay
+					// Open completion - reset k8s state and load candidates
+					m.k8sCompletionStep = 0
+					m.k8sSelectedKubeconfig = ""
+					m.k8sSelectedContext = ""
 					m.loadContextCompletions()
 					m.contextCompletionActive = true
 					m.contextCompletionInput.Reset()
@@ -930,12 +945,55 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						return m, nil
 					case "enter":
-						// Select the completion and put it in the edit input
+						// Select the completion
 						if len(m.contextCompletionMatches) > 0 && m.contextCompletionSelected < len(m.contextCompletionMatches) {
 							idx := m.contextCompletionMatches[m.contextCompletionSelected]
 							selected := m.contextCompletionCandidates[idx]
-							m.contextEditInput.SetValue(selected)
-							m.contextEditInput.CursorEnd()
+
+							// Handle k8s multi-step completion
+							if m.contextEditField == "k8s" {
+								switch m.k8sCompletionStep {
+								case 0:
+									// Selected kubeconfig, advance to context selection
+									m.k8sSelectedKubeconfig = selected
+									m.k8sCompletionStep = 1
+									m.contextCompletionInput.Reset()
+									m.loadContextCompletions()
+									return m, nil
+								case 1:
+									// Selected context, advance to namespace selection
+									m.k8sSelectedContext = selected
+									m.k8sCompletionStep = 2
+									m.contextCompletionInput.Reset()
+									m.loadContextCompletions()
+									return m, nil
+								case 2:
+									// Selected namespace, build final value
+									home, _ := os.UserHomeDir()
+									defaultConfig := filepath.Join(home, ".kube", "config")
+
+									var finalValue string
+									if m.k8sSelectedKubeconfig == defaultConfig {
+										// Default kubeconfig, just context and namespace
+										finalValue = m.k8sSelectedContext + " " + selected
+									} else {
+										// Custom kubeconfig
+										finalValue = m.k8sSelectedContext + " " + selected + " --kubeconfig " + m.k8sSelectedKubeconfig
+									}
+
+									m.contextEditInput.SetValue(finalValue)
+									m.contextEditInput.CursorEnd()
+									// Reset k8s state
+									m.k8sCompletionStep = 0
+									m.k8sSelectedKubeconfig = ""
+									m.k8sSelectedContext = ""
+								}
+							} else {
+								// Non-k8s field: just set the value
+								m.contextEditInput.SetValue(selected)
+								m.contextEditInput.CursorEnd()
+							}
+
 							m.contextCompletionActive = false
 							m.contextCompletionInput.Reset()
 							m.contextCompletionInput.Blur()
@@ -2787,6 +2845,19 @@ func (m Model) renderContextEditPopup() string {
 
 	// Show completion overlay if active
 	if m.contextCompletionActive {
+		// Show step indicator for k8s
+		if m.contextEditField == "k8s" {
+			stepLabels := []string{"① Kubeconfig", "② Context", "③ Namespace"}
+			stepIndicator := stepLabels[m.k8sCompletionStep]
+			if m.k8sSelectedKubeconfig != "" {
+				// Show selected kubeconfig (basename only)
+				stepIndicator += " • " + filepath.Base(m.k8sSelectedKubeconfig)
+			}
+			if m.k8sSelectedContext != "" {
+				stepIndicator += " → " + m.k8sSelectedContext
+			}
+			content.WriteString(m.theme.Title.Render(stepIndicator) + "\n")
+		}
 		content.WriteString(m.theme.Dim.Render("─── Completions ───") + "\n")
 		content.WriteString(m.contextCompletionInput.View() + "\n\n")
 
@@ -2843,7 +2914,15 @@ func (m Model) renderContextEditPopup() string {
 func (m *Model) loadContextCompletions() {
 	switch m.contextEditField {
 	case "k8s":
-		m.contextCompletionCandidates = loadK8sCompletions()
+		// Multi-step: kubeconfig -> context -> namespace
+		switch m.k8sCompletionStep {
+		case 0:
+			m.contextCompletionCandidates = loadK8sKubeconfigs()
+		case 1:
+			m.contextCompletionCandidates = loadK8sContexts(m.k8sSelectedKubeconfig)
+		case 2:
+			m.contextCompletionCandidates = loadK8sNamespaces(m.k8sSelectedKubeconfig, m.k8sSelectedContext)
+		}
 	case "aws":
 		m.contextCompletionCandidates = loadAWSCompletions()
 	case "git":
@@ -2883,8 +2962,8 @@ func (m *Model) computeContextCompletionMatches(query string) {
 	}
 }
 
-// loadK8sCompletions returns kubernetes contexts from kubeconfig files
-func loadK8sCompletions() []string {
+// loadK8sKubeconfigs returns available kubeconfig files from ~/.kube
+func loadK8sKubeconfigs() []string {
 	var results []string
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -2899,29 +2978,49 @@ func loadK8sCompletions() []string {
 		return results
 	}
 
+	// Add default config first if it exists
+	defaultConfig := filepath.Join(kubeDir, "config")
+	if _, err := os.Stat(defaultConfig); err == nil {
+		results = append(results, defaultConfig)
+	}
+
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 
-		path := filepath.Join(kubeDir, entry.Name())
-		contexts := parseKubeconfigContexts(path)
-		for _, ctx := range contexts {
-			// Format: context (from filename)
-			if entry.Name() != "config" {
-				results = append(results, fmt.Sprintf("%s --kubeconfig %s", ctx, path))
-			} else {
-				results = append(results, ctx)
-			}
+		// Skip non-config files (like cache, http-cache directories' contents)
+		name := entry.Name()
+		if name == "config" {
+			continue // Already added
+		}
+
+		// Check if file looks like a kubeconfig (has contexts section)
+		path := filepath.Join(kubeDir, name)
+		if hasKubeconfigContexts(path) {
+			results = append(results, path)
 		}
 	}
 
 	return results
 }
 
-// parseKubeconfigContexts extracts context names from a kubeconfig file
-func parseKubeconfigContexts(path string) []string {
+// hasKubeconfigContexts checks if a file contains a contexts: section
+func hasKubeconfigContexts(path string) bool {
 	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "contexts:")
+}
+
+// loadK8sContexts returns contexts from a specific kubeconfig file
+func loadK8sContexts(kubeconfigPath string) []string {
+	if kubeconfigPath == "" {
+		return nil
+	}
+
+	data, err := os.ReadFile(kubeconfigPath)
 	if err != nil {
 		return nil
 	}
@@ -2949,6 +3048,37 @@ func parseKubeconfigContexts(path string) []string {
 			if name != "" {
 				results = append(results, name)
 			}
+		}
+	}
+
+	return results
+}
+
+// loadK8sNamespaces returns namespaces from the cluster using kubectl
+func loadK8sNamespaces(kubeconfigPath, contextName string) []string {
+	var results []string
+
+	// Build kubectl command with kubeconfig and context
+	args := []string{"get", "namespaces", "-o", "jsonpath={.items[*].metadata.name}"}
+	if kubeconfigPath != "" {
+		args = append([]string{"--kubeconfig", kubeconfigPath}, args...)
+	}
+	if contextName != "" {
+		args = append([]string{"--context", contextName}, args...)
+	}
+
+	cmd := exec.Command("kubectl", args...)
+	output, err := cmd.Output()
+	if err != nil {
+		// Fallback to common namespaces if kubectl fails
+		return []string{"default", "kube-system", "kube-public"}
+	}
+
+	// Parse space-separated namespace names
+	namespaces := strings.Fields(string(output))
+	for _, ns := range namespaces {
+		if ns != "" {
+			results = append(results, ns)
 		}
 	}
 
