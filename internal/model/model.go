@@ -1,7 +1,6 @@
 package model
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -185,6 +184,13 @@ type Model struct {
 	contextEditInput textinput.Model       // Edit input field
 	contextViewport  viewport.Model        // For scrolling context list
 
+	// Context completion (in-app fuzzy search)
+	contextCompletionActive     bool            // Whether completion overlay is showing
+	contextCompletionInput      textinput.Model // Filter input for completion
+	contextCompletionCandidates []string        // All candidates for current field
+	contextCompletionMatches    []int           // Indices of matching candidates
+	contextCompletionSelected   int             // Currently selected match index
+
 	// Layout
 	hideLeftPane bool // Toggle left pane visibility
 
@@ -361,6 +367,13 @@ func New(socketPath string, opts ...Option) Model {
 	ctxTi.CharLimit = 200
 	ctxTi.Width = 40
 	m.contextEditInput = ctxTi
+
+	// Initialize context completion input
+	compTi := textinput.New()
+	compTi.Placeholder = "Type to filter..."
+	compTi.CharLimit = 100
+	compTi.Width = 40
+	m.contextCompletionInput = compTi
 
 	// Initialize context viewport
 	m.contextViewport = viewport.New(0, 0)
@@ -875,53 +888,72 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "esc":
+				// If completion is active, close it first
+				if m.contextCompletionActive {
+					m.contextCompletionActive = false
+					m.contextCompletionInput.Reset()
+					m.contextCompletionInput.Blur()
+					return m, nil
+				}
 				// Cancel editing
 				m.contextEditMode = false
 				m.contextEditField = ""
 				m.contextEditInput.Reset()
 				return m, nil
 			case "tab":
-				// Launch fzf for autocomplete based on field type
-				var cmd *exec.Cmd
-				switch m.contextEditField {
-				case "k8s":
-					// Get kubectl contexts
-					cmd = exec.Command("sh", "-c", "kubectl config get-contexts -o name 2>/dev/null | fzf --height 40% --prompt='Context: '")
-				case "aws":
-					// Get AWS profiles from ~/.aws/config and credentials
-					cmd = exec.Command("sh", "-c", "(grep '\\[profile' ~/.aws/config ~/.aws/credentials 2>/dev/null | sed 's/.*profile //\\[' | tr -d ']' | grep -v default; cat ~/.aws/credentials 2>/dev/null | grep '\\[' | sed 's/\\[//\\]') | sort -u | fzf --height 40% --prompt='Profile: '")
-				case "git":
-					// Get git branches and recent repos from zhistory
-					cmd = exec.Command("sh", "-c", "(git branch 2>/dev/null | sed 's/..//'; zsh -c 'print -rl -- ${(j:\\n:)${(k)history[(R)cd *|git *]}}' 2>/dev/null | head -20) | fzf --height 40% --prompt='Git: '")
-				case "env":
-					// Get recent env vars from zhistory
-					cmd = exec.Command("sh", "-c", "zsh -c 'print -rl -- ${(j:\\n:)${(k)history[(R)export *]}}' 2>/dev/null | sed 's/^export //' | sort -u | fzf --height 40% --prompt='Env: '")
-				case "custom":
-					// Get recent custom settings from zhistory
-					cmd = exec.Command("sh", "-c", "zsh -c 'print -rl -- ${(j:\\n:)${(k)history[(R)/prompt:*]}' 2>/dev/null | sed 's|^/prompt:context ||' | sort -u | fzf --height 40% --prompt='Custom: '")
-				default:
-					// General autocomplete from zhistory
-					cmd = exec.Command("sh", "-c", "zsh -c 'print -rl -- ${(j:\\n:)${(k)history[(R)*]}[1,100]' 2>/dev/null | fzf --height 40% --prompt='Value: '")
+				// Toggle completion overlay
+				if m.contextCompletionActive {
+					// Close completion
+					m.contextCompletionActive = false
+					m.contextCompletionInput.Reset()
+					m.contextCompletionInput.Blur()
+				} else {
+					// Open completion - load candidates and show overlay
+					m.loadContextCompletions()
+					m.contextCompletionActive = true
+					m.contextCompletionInput.Reset()
+					m.contextCompletionInput.Focus()
 				}
-
-				// Capture fzf output
-				var output bytes.Buffer
-				cmd.Stdout = &output
-
-				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-					if err != nil {
-						logger.Log("fzf cancelled or failed: %v", err)
-						return nil
-					}
-					// Set the selected value as input
-					selected := strings.TrimSpace(output.String())
-					if selected != "" {
-						m.contextEditInput.SetValue(selected)
-						m.contextEditInput.CursorEnd()
-					}
-					return nil
-				})
+				return m, nil
 			default:
+				// If completion overlay is active, handle its keys
+				if m.contextCompletionActive {
+					switch key {
+					case "up", "ctrl+p":
+						if m.contextCompletionSelected > 0 {
+							m.contextCompletionSelected--
+						}
+						return m, nil
+					case "down", "ctrl+n":
+						if m.contextCompletionSelected < len(m.contextCompletionMatches)-1 {
+							m.contextCompletionSelected++
+						}
+						return m, nil
+					case "enter":
+						// Select the completion and put it in the edit input
+						if len(m.contextCompletionMatches) > 0 && m.contextCompletionSelected < len(m.contextCompletionMatches) {
+							idx := m.contextCompletionMatches[m.contextCompletionSelected]
+							selected := m.contextCompletionCandidates[idx]
+							m.contextEditInput.SetValue(selected)
+							m.contextEditInput.CursorEnd()
+							m.contextCompletionActive = false
+							m.contextCompletionInput.Reset()
+							m.contextCompletionInput.Blur()
+						}
+						return m, nil
+					default:
+						// Forward to completion filter input
+						var cmd tea.Cmd
+						m.contextCompletionInput, cmd = m.contextCompletionInput.Update(msg)
+						// Recompute matches based on filter
+						m.computeContextCompletionMatches(m.contextCompletionInput.Value())
+						// Reset selection if it's out of bounds
+						if m.contextCompletionSelected >= len(m.contextCompletionMatches) {
+							m.contextCompletionSelected = 0
+						}
+						return m, cmd
+					}
+				}
 				// Forward to textinput
 				var cmd tea.Cmd
 				m.contextEditInput, cmd = m.contextEditInput.Update(msg)
@@ -2749,10 +2781,49 @@ func (m Model) renderContextEditPopup() string {
 	// Build popup content
 	var content strings.Builder
 	content.WriteString(m.theme.Title.Render(title) + "\n")
-	content.WriteString(m.theme.Dim.Render(strings.Repeat("─", 40)) + "\n\n")
+	content.WriteString(m.theme.Dim.Render(strings.Repeat("─", 50)) + "\n\n")
 	content.WriteString(m.theme.Normal.Render(placeholder) + "\n\n")
 	content.WriteString(m.contextEditInput.View() + "\n\n")
-	content.WriteString(m.theme.Dim.Render("Tab:autocomplete  Enter:save  Esc:cancel"))
+
+	// Show completion overlay if active
+	if m.contextCompletionActive {
+		content.WriteString(m.theme.Dim.Render("─── Completions ───") + "\n")
+		content.WriteString(m.contextCompletionInput.View() + "\n\n")
+
+		// Show matches (up to 10)
+		maxDisplay := 10
+		startIdx := 0
+		if m.contextCompletionSelected >= maxDisplay {
+			startIdx = m.contextCompletionSelected - maxDisplay + 1
+		}
+
+		for i := startIdx; i < len(m.contextCompletionMatches) && i < startIdx+maxDisplay; i++ {
+			candidateIdx := m.contextCompletionMatches[i]
+			candidate := m.contextCompletionCandidates[candidateIdx]
+
+			// Truncate long candidates
+			if len(candidate) > 45 {
+				candidate = candidate[:42] + "..."
+			}
+
+			if i == m.contextCompletionSelected {
+				content.WriteString(m.theme.Selected.Render("> "+candidate) + "\n")
+			} else {
+				content.WriteString(m.theme.Dim.Render("  "+candidate) + "\n")
+			}
+		}
+
+		if len(m.contextCompletionMatches) == 0 {
+			content.WriteString(m.theme.Dim.Render("  (no matches)") + "\n")
+		} else if len(m.contextCompletionMatches) > maxDisplay {
+			content.WriteString(m.theme.Dim.Render(fmt.Sprintf("  ... +%d more", len(m.contextCompletionMatches)-maxDisplay)) + "\n")
+		}
+
+		content.WriteString("\n")
+		content.WriteString(m.theme.Dim.Render("↑/↓:navigate  Enter:select  Tab/Esc:close"))
+	} else {
+		content.WriteString(m.theme.Dim.Render("Tab:autocomplete  Enter:save  Esc:cancel"))
+	}
 
 	// Wrap content in a bordered box
 	contentStr := content.String()
@@ -2766,6 +2837,312 @@ func (m Model) renderContextEditPopup() string {
 		Width(lipgloss.Width(contentStr) + 4)
 
 	return popupStyle.Render(contentStr)
+}
+
+// loadContextCompletions loads completion candidates for the current context field
+func (m *Model) loadContextCompletions() {
+	switch m.contextEditField {
+	case "k8s":
+		m.contextCompletionCandidates = loadK8sCompletions()
+	case "aws":
+		m.contextCompletionCandidates = loadAWSCompletions()
+	case "git":
+		m.contextCompletionCandidates = loadGitCompletions()
+	case "env":
+		m.contextCompletionCandidates = loadEnvCompletions()
+	case "custom":
+		m.contextCompletionCandidates = loadCustomCompletions(m.contextCurrent)
+	default:
+		m.contextCompletionCandidates = nil
+	}
+
+	// Initialize matches to all candidates
+	m.contextCompletionMatches = make([]int, len(m.contextCompletionCandidates))
+	for i := range m.contextCompletionCandidates {
+		m.contextCompletionMatches[i] = i
+	}
+	m.contextCompletionSelected = 0
+}
+
+// computeContextCompletionMatches filters candidates by query
+func (m *Model) computeContextCompletionMatches(query string) {
+	if query == "" {
+		m.contextCompletionMatches = make([]int, len(m.contextCompletionCandidates))
+		for i := range m.contextCompletionCandidates {
+			m.contextCompletionMatches[i] = i
+		}
+		return
+	}
+
+	query = strings.ToLower(query)
+	m.contextCompletionMatches = nil
+	for i, c := range m.contextCompletionCandidates {
+		if strings.Contains(strings.ToLower(c), query) {
+			m.contextCompletionMatches = append(m.contextCompletionMatches, i)
+		}
+	}
+}
+
+// loadK8sCompletions returns kubernetes contexts from kubeconfig files
+func loadK8sCompletions() []string {
+	var results []string
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return results
+	}
+
+	kubeDir := filepath.Join(home, ".kube")
+
+	// Find all kubeconfig files
+	entries, err := os.ReadDir(kubeDir)
+	if err != nil {
+		return results
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		path := filepath.Join(kubeDir, entry.Name())
+		contexts := parseKubeconfigContexts(path)
+		for _, ctx := range contexts {
+			// Format: context (from filename)
+			if entry.Name() != "config" {
+				results = append(results, fmt.Sprintf("%s --kubeconfig %s", ctx, path))
+			} else {
+				results = append(results, ctx)
+			}
+		}
+	}
+
+	return results
+}
+
+// parseKubeconfigContexts extracts context names from a kubeconfig file
+func parseKubeconfigContexts(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	// Simple YAML parsing for contexts
+	var results []string
+	lines := strings.Split(string(data), "\n")
+	inContexts := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		if trimmed == "contexts:" {
+			inContexts = true
+			continue
+		}
+
+		// End of contexts section
+		if inContexts && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") && trimmed != "" {
+			break
+		}
+
+		if inContexts && strings.HasPrefix(trimmed, "- name:") {
+			name := strings.TrimSpace(strings.TrimPrefix(trimmed, "- name:"))
+			if name != "" {
+				results = append(results, name)
+			}
+		}
+	}
+
+	return results
+}
+
+// loadAWSCompletions returns AWS profiles from config and credentials
+func loadAWSCompletions() []string {
+	var results []string
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return results
+	}
+
+	// Parse ~/.aws/config for [profile xxx] sections
+	configPath := filepath.Join(home, ".aws", "config")
+	if profiles := parseAWSConfigProfiles(configPath); len(profiles) > 0 {
+		results = append(results, profiles...)
+	}
+
+	// Parse ~/.aws/credentials for [xxx] sections (profile names without "profile " prefix)
+	credsPath := filepath.Join(home, ".aws", "credentials")
+	if profiles := parseAWSCredentialsProfiles(credsPath); len(profiles) > 0 {
+		results = append(results, profiles...)
+	}
+
+	// Remove duplicates
+	seen := make(map[string]bool)
+	var unique []string
+	for _, p := range results {
+		if !seen[p] {
+			seen[p] = true
+			unique = append(unique, p)
+		}
+	}
+
+	return unique
+}
+
+// parseAWSConfigProfiles extracts profile names from ~/.aws/config
+func parseAWSConfigProfiles(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	var results []string
+	lines := strings.Split(string(data), "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[profile ") && strings.HasSuffix(line, "]") {
+			name := strings.TrimSuffix(strings.TrimPrefix(line, "[profile "), "]")
+			results = append(results, name)
+		} else if strings.HasPrefix(line, "[default]") {
+			results = append(results, "default")
+		}
+	}
+
+	return results
+}
+
+// parseAWSCredentialsProfiles extracts profile names from ~/.aws/credentials
+func parseAWSCredentialsProfiles(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	var results []string
+	lines := strings.Split(string(data), "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			name := strings.Trim(line, "[]")
+			results = append(results, name)
+		}
+	}
+
+	return results
+}
+
+// loadGitCompletions returns git branches and recent repos
+func loadGitCompletions() []string {
+	var results []string
+
+	// Get current repo branches
+	cmd := exec.Command("git", "branch", "--format=%(refname:short)")
+	output, err := cmd.Output()
+	if err == nil {
+		for _, branch := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+			if branch != "" {
+				results = append(results, branch)
+			}
+		}
+	}
+
+	// Add remote branches
+	cmd = exec.Command("git", "branch", "-r", "--format=%(refname:short)")
+	output, err = cmd.Output()
+	if err == nil {
+		for _, branch := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+			if branch != "" && !strings.Contains(branch, "HEAD") {
+				// Remove origin/ prefix for cleaner display
+				branch = strings.TrimPrefix(branch, "origin/")
+				results = append(results, branch)
+			}
+		}
+	}
+
+	// Remove duplicates
+	seen := make(map[string]bool)
+	var unique []string
+	for _, b := range results {
+		if !seen[b] {
+			seen[b] = true
+			unique = append(unique, b)
+		}
+	}
+
+	return unique
+}
+
+// loadEnvCompletions returns env var suggestions from zsh history
+func loadEnvCompletions() []string {
+	var results []string
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return results
+	}
+
+	// Try to read zsh history
+	histPath := filepath.Join(home, ".zsh_history")
+	data, err := os.ReadFile(histPath)
+	if err != nil {
+		// Try alternative location
+		histPath = filepath.Join(home, ".histfile")
+		data, err = os.ReadFile(histPath)
+		if err != nil {
+			return results
+		}
+	}
+
+	// Parse history for export commands
+	seen := make(map[string]bool)
+	lines := strings.Split(string(data), "\n")
+
+	for _, line := range lines {
+		// Handle zsh extended history format (: timestamp:0;command)
+		if idx := strings.Index(line, ";"); idx != -1 {
+			line = line[idx+1:]
+		}
+
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "export ") {
+			// Extract KEY=VALUE
+			envPart := strings.TrimPrefix(line, "export ")
+			// Handle multiple exports on same line
+			parts := strings.Fields(envPart)
+			for _, part := range parts {
+				if strings.Contains(part, "=") && !seen[part] {
+					seen[part] = true
+					results = append(results, part)
+				}
+			}
+		}
+	}
+
+	// Limit results
+	if len(results) > 100 {
+		results = results[len(results)-100:]
+	}
+
+	return results
+}
+
+// loadCustomCompletions returns existing custom keys from current context
+func loadCustomCompletions(ctx *workingctx.Context) []string {
+	var results []string
+	if ctx == nil {
+		return results
+	}
+
+	custom := ctx.GetCustom()
+	if custom == nil {
+		return results
+	}
+
+	for k, v := range custom {
+		results = append(results, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	return results
 }
 
 // listVisibleItems returns the number of items that can fit in the history list view
