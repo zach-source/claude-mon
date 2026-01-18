@@ -770,31 +770,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							}
 							m.contextCurrent.SetGit(branch, repo)
 						case "env":
-							// Parse: KEY=VALUE [KEY2=VALUE2...]
-							envVars := make(map[string]string)
-							parts := strings.Fields(value)
-							for _, part := range parts {
-								if strings.Contains(part, "=") {
-									kv := strings.SplitN(part, "=", 2)
-									if len(kv) == 2 {
-										envVars[kv[0]] = kv[1]
-									}
+							// Parse: KEY=VALUE with quote support, merge into existing
+							// Supports: KEY=value, KEY="value with spaces", KEY='quoted'
+							if k, v, ok := parseKeyValue(value); ok {
+								envVars := m.contextCurrent.GetEnv()
+								if envVars == nil {
+									envVars = make(map[string]string)
 								}
+								envVars[k] = v
+								m.contextCurrent.SetEnv(envVars)
 							}
-							m.contextCurrent.SetEnv(envVars)
 						case "custom":
-							// Parse: KEY=VALUE [KEY2=VALUE2...]
-							customVars := make(map[string]string)
-							parts := strings.Fields(value)
-							for _, part := range parts {
-								if strings.Contains(part, "=") {
-									kv := strings.SplitN(part, "=", 2)
-									if len(kv) == 2 {
-										customVars[kv[0]] = kv[1]
-									}
+							// Parse: KEY=VALUE with quote support, merge into existing
+							// Supports: KEY=value, KEY="value with spaces", KEY='quoted'
+							if k, v, ok := parseKeyValue(value); ok {
+								customVars := m.contextCurrent.GetCustom()
+								if customVars == nil {
+									customVars = make(map[string]string)
 								}
+								customVars[k] = v
+								m.contextCurrent.SetCustom(customVars)
 							}
-							m.contextCurrent.SetCustom(customVars)
 						}
 
 						// Save the context
@@ -4040,6 +4036,48 @@ func truncatePath(path string, maxLen int) string {
 		return "..." + result[len(result)-maxLen+3:]
 	}
 	return ".../" + result
+}
+
+// parseKeyValue parses a KEY=VALUE string where VALUE can be quoted with ", ', or `
+// Examples:
+//   - "foo=bar" -> ("foo", "bar")
+//   - "foo='hello world'" -> ("foo", "hello world")
+//   - `foo="my sentence"` -> ("foo", "my sentence")
+//   - "foo=`backtick quoted`" -> ("foo", "backtick quoted")
+func parseKeyValue(input string) (key, value string, ok bool) {
+	// Find the first = sign
+	eqIdx := -1
+	for i, c := range input {
+		if c == '=' {
+			eqIdx = i
+			break
+		}
+	}
+
+	if eqIdx <= 0 {
+		return "", "", false
+	}
+
+	key = input[:eqIdx]
+	remainder := input[eqIdx+1:]
+
+	// Check if value is quoted
+	if len(remainder) >= 2 {
+		first := remainder[0]
+		if first == '"' || first == '\'' || first == '`' {
+			// Find matching closing quote
+			for i := len(remainder) - 1; i > 0; i-- {
+				if remainder[i] == first {
+					value = remainder[1:i]
+					return key, value, true
+				}
+			}
+		}
+	}
+
+	// Not quoted, use the whole remainder
+	value = remainder
+	return key, value, true
 }
 
 // relativePath converts an absolute path to relative if possible

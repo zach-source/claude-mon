@@ -240,3 +240,49 @@ func TestChangeTimestamp(t *testing.T) {
 		t.Errorf("timestamp %v should be between %v and %v", change.Timestamp, before, after)
 	}
 }
+
+func TestParseKeyValue(t *testing.T) {
+	tests := []struct {
+		input   string
+		wantKey string
+		wantVal string
+		wantOk  bool
+	}{
+		// Simple cases
+		{"foo=bar", "foo", "bar", true},
+		{"DEBUG=true", "DEBUG", "true", true},
+
+		// Double-quoted values with spaces
+		{`foo="hello world"`, "foo", "hello world", true},
+		{`MESSAGE="this is a test"`, "MESSAGE", "this is a test", true},
+
+		// Single-quoted values with spaces
+		{`foo='hello world'`, "foo", "hello world", true},
+
+		// Backtick-quoted values
+		{"foo=`hello world`", "foo", "hello world", true},
+
+		// Values with special characters
+		{`PATH="/usr/bin:/usr/local/bin"`, "PATH", "/usr/bin:/usr/local/bin", true},
+
+		// Invalid cases
+		{"noequals", "", "", false},
+		{"=value", "", "", false},
+		{"", "", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			key, val, ok := parseKeyValue(tt.input)
+			if ok != tt.wantOk {
+				t.Errorf("parseKeyValue(%q) ok = %v, want %v", tt.input, ok, tt.wantOk)
+			}
+			if key != tt.wantKey {
+				t.Errorf("parseKeyValue(%q) key = %q, want %q", tt.input, key, tt.wantKey)
+			}
+			if val != tt.wantVal {
+				t.Errorf("parseKeyValue(%q) val = %q, want %q", tt.input, val, tt.wantVal)
+			}
+		})
+	}
+}
