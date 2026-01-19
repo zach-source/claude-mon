@@ -15,6 +15,10 @@ func TestDetectVCSType(t *testing.T) {
 	}
 
 	vcsType := DetectVCSType(cwd)
+	// Skip if no VCS detected (e.g., in nix build sandbox)
+	if vcsType == "" {
+		t.Skip("No VCS detected (may be running in sandboxed environment)")
+	}
 	// The test repo is a git repo
 	if vcsType != "git" && vcsType != "jj" {
 		t.Errorf("Expected git or jj, got: %s", vcsType)
