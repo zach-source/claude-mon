@@ -140,22 +140,16 @@ type Model struct {
 	persistHistory   bool             // Whether to save history to file
 
 	// Prompt manager (integrated in left pane)
-	promptStore          *prompt.Store          // Prompt storage
-	promptList           []prompt.Prompt        // Cached list of prompts (all prompts)
-	promptFilteredList   []prompt.Prompt        // Filtered list based on scope
-	promptSelected       int                    // Selected prompt index
-	promptFilter         PromptFilter           // Current filter scope (all/project/global)
-	promptFuzzyActive    bool                   // Whether fuzzy filter overlay is active
-	promptFuzzyInput     textinput.Model        // Fuzzy search input
-	promptFuzzyMatches   []int                  // Indices of matching prompts
-	promptFuzzySelected  int                    // Selected match in fuzzy results
-	promptRefining       bool                   // Whether we're in refine mode
-	promptRefineInput    textinput.Model        // Refinement request input
-	promptRefiningPrompt *prompt.Prompt         // Prompt being refined
-	promptRefiningCmd    *exec.Cmd              // Running Claude CLI command
-	promptRefiningOutput string                 // Accumulated output from refinement
-	promptRefiningDone   bool                   // Whether refinement is complete
-	promptInjectMethod   prompt.InjectionMethod // Current injection method
+	promptStore         *prompt.Store          // Prompt storage
+	promptList          []prompt.Prompt        // Cached list of prompts (all prompts)
+	promptFilteredList  []prompt.Prompt        // Filtered list based on scope
+	promptSelected      int                    // Selected prompt index
+	promptFilter        PromptFilter           // Current filter scope (all/project/global)
+	promptFuzzyActive   bool                   // Whether fuzzy filter overlay is active
+	promptFuzzyInput    textinput.Model        // Fuzzy search input
+	promptFuzzyMatches  []int                  // Indices of matching prompts
+	promptFuzzySelected int                    // Selected match in fuzzy results
+	promptInjectMethod  prompt.InjectionMethod // Current injection method
 
 	// Version view mode
 	promptShowVersions    bool                   // Whether showing version list
@@ -354,13 +348,6 @@ func New(socketPath string, opts ...Option) Model {
 	ti.CharLimit = 500
 	ti.Width = 60
 	m.planInput = ti
-
-	// Initialize prompt refine input
-	refineTi := textinput.New()
-	refineTi.Placeholder = "What do you want to improve?"
-	refineTi.CharLimit = 500
-	refineTi.Width = 60
-	m.promptRefineInput = refineTi
 
 	// Initialize fuzzy filter input
 	fuzzyTi := textinput.New()
@@ -734,33 +721,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 
-		// Handle refine input mode - must check BEFORE global keys
-		if m.promptRefining {
-			switch key {
-			case "enter":
-				// Submit refinement request
-				request := m.promptRefineInput.Value()
-				if request != "" {
-					m.promptRefining = false
-					m.promptRefineInput.Reset()
-					return m, func() tea.Msg {
-						return promptRefineInputMsg{request: request}
-					}
-				}
-			case "esc":
-				// Cancel refine input
-				m.promptRefining = false
-				m.promptRefiningPrompt = nil
-				m.promptRefineInput.Reset()
-				return m, nil
-			default:
-				// Forward to textinput
-				var cmd tea.Cmd
-				m.promptRefineInput, cmd = m.promptRefineInput.Update(msg)
-				return m, cmd
-			}
-		}
-
 		// Handle plan input mode - must check BEFORE global keys
 		if m.planInputActive {
 			switch key {
@@ -873,7 +833,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Global keys (work in any mode when chat is NOT active)
+		// Global keys (work in any mode)
 		switch key {
 		case m.config.Keys.Help:
 			m.showHelp = true
@@ -1006,7 +966,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case promptEditedMsg:
 		// Prompt was edited in nvim - update frontmatter and refresh list
 		logger.Log("Prompt edited: %s, leftPaneMode=%d", msg.path, m.leftPaneMode)
-		m.promptRefining = false
 		m.leftPaneMode = LeftPaneModePrompts // Ensure we stay in prompts mode
 
 		// Update version and timestamp in frontmatter
@@ -1019,83 +978,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshPromptList()
 		m.diffViewport.SetContent(m.renderRightPane())
 		m.addToast("Prompt saved", ToastSuccess)
-
-	case promptRefinedMsg:
-		// Claude refined the prompt - open nvim diff
-		logger.Log("Prompt refined: %s vs %s", msg.originalPath, msg.refinedPath)
-		cmd := exec.Command("nvim", "-d", msg.originalPath, msg.refinedPath)
-		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-			// Clean up temp file
-			os.Remove(msg.refinedPath)
-			return promptEditedMsg{path: msg.originalPath}
-		})
-
-	case promptRefineErrorMsg:
-		logger.Log("Prompt refine error: %v", msg.err)
-		m.promptRefining = false
-		m.promptRefiningDone = false
-		m.promptRefiningCmd = nil
-		m.addToast("Refine failed: "+msg.err.Error(), ToastError)
-
-	case promptRefineCompleteMsg:
-		// Claude CLI finished refinement - create version backup and save refined prompt
-		logger.Log("Prompt refinement complete, received %d bytes", len(msg.output))
-		m.promptRefiningDone = true
-		m.promptRefiningCmd = nil
-
-		p := m.promptRefiningPrompt
-		if p == nil {
-			m.promptRefining = false
-			m.addToast("No prompt to refine", ToastError)
-			return m, nil
-		}
-
-		// First, create a version backup of the current prompt
-		if err := m.promptStore.CreateVersion(p); err != nil {
-			logger.Log("Failed to create version backup: %v", err)
-			m.addToast("Failed to backup: "+err.Error(), ToastWarning)
-			// Continue anyway - the backup is nice to have but not critical
-		} else {
-			logger.Log("Created version backup: %s -> v%d", p.Name, p.Version)
-		}
-
-		// Now update the prompt with refined content and new version number
-		now := time.Now()
-		refinedPrompt := prompt.Prompt{
-			Name:        p.Name,
-			Description: p.Description,
-			Version:     p.Version, // Already incremented by CreateVersion
-			Created:     p.Created, // Keep original creation date
-			Updated:     now,       // Update timestamp to now
-			Tags:        p.Tags,
-			Content:     msg.output,
-			Path:        p.Path, // Save to same path
-			IsGlobal:    p.IsGlobal,
-		}
-
-		// Save the refined prompt
-		if err := m.promptStore.Save(&refinedPrompt); err != nil {
-			m.promptRefining = false
-			m.addToast("Failed to save refined prompt: "+err.Error(), ToastError)
-			logger.Log("Failed to save refined prompt: %v", err)
-			return m, nil
-		}
-
-		logger.Log("Saved refined prompt version %d: %s", refinedPrompt.Version, p.Path)
-
-		// Open nvim for further editing
-		m.addToast(fmt.Sprintf("Saved v%d, editing...", refinedPrompt.Version), ToastSuccess)
-		cmd := exec.Command("nvim", p.Path)
-		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-			// Refresh prompt list after editing
-			return promptEditedMsg{path: p.Path}
-		})
-
-	case promptRefineInputMsg:
-		// User submitted refinement request - execute refinement
-		logger.Log("Executing refinement with request: %s", msg.request)
-		m.addToast("Refining with Claude...", ToastInfo)
-		return m, m.executePromptRefinement(msg.request)
 
 	case planGeneratedMsg:
 		logger.Log("Plan generated: %s", msg.path)
@@ -1452,12 +1334,6 @@ func (m Model) handlePromptsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.promptFilteredList) > 0 {
 			return m.editPrompt(m.promptFilteredList[m.promptSelected])
 		}
-	case m.config.Keys.RefinePrompt:
-		// Refine prompt with Claude
-		if len(m.promptFilteredList) > 0 && !m.promptRefining {
-			m.addToast("Refining with Claude...", ToastInfo)
-			return m.refinePrompt(m.promptFilteredList[m.promptSelected])
-		}
 	case m.config.Keys.CreateVersion:
 		// Create version backup
 		logger.Log("Version key pressed: promptFilteredList=%d, promptStore=%v", len(m.promptFilteredList), m.promptStore != nil)
@@ -1813,11 +1689,6 @@ func (m Model) handleLeaderKeyPrompts(key string) (tea.Model, tea.Cmd) {
 	case "e": // Edit prompt
 		if len(m.promptList) > 0 {
 			return m.editPrompt(m.promptList[m.promptSelected])
-		}
-	case "r": // Refine prompt
-		if len(m.promptList) > 0 && !m.promptRefining {
-			m.addToast("Refining with Claude...", ToastInfo)
-			return m.refinePrompt(m.promptList[m.promptSelected])
 		}
 	case "y": // Yank prompt
 		if len(m.promptList) > 0 {
@@ -2459,13 +2330,7 @@ func (m Model) View() string {
 	// Render header with tab bar
 	tabBar := m.renderTabBar()
 
-	// Refining status indicator
-	refineIndicator := ""
-	if m.promptRefining {
-		refineIndicator = m.theme.Selected.Render(" ⏳ Refining...")
-	}
-
-	header := m.theme.Title.Render("claude-mon") + " " + tabBar + refineIndicator
+	header := m.theme.Title.Render("claude-mon") + " " + tabBar
 	header = lipgloss.PlaceHorizontal(m.width, lipgloss.Left, header)
 
 	// Two-pane layout
@@ -3691,43 +3556,6 @@ func (m Model) renderPromptsList() string {
 	var sb strings.Builder
 	listWidth := m.width / 3
 
-	// Show refine input overlay when refining
-	if m.promptRefining {
-		sb.WriteString(m.theme.Title.Render("Refine Prompt") + "\n")
-		sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", listWidth-4)) + "\n\n")
-
-		if !m.promptRefiningDone {
-			// Still collecting input or running refinement
-			if m.promptRefiningCmd == nil {
-				// Input phase
-				sb.WriteString(m.theme.Normal.Render("What do you want to improve?\n\n"))
-				sb.WriteString(m.promptRefineInput.View() + "\n\n")
-				sb.WriteString(m.theme.Dim.Render("Enter:submit  Esc:cancel\n\n"))
-
-				// Show available template variables
-				sb.WriteString(m.theme.Title.Render("Available Variables:") + "\n")
-				sb.WriteString(m.theme.Dim.Render("{{plan}}       Plan content\n"))
-				sb.WriteString(m.theme.Dim.Render("{{plan_name}}  Plan file name\n"))
-				sb.WriteString(m.theme.Dim.Render("{{file}}       Current file path\n"))
-				sb.WriteString(m.theme.Dim.Render("{{file_name}}  Current file name\n"))
-				sb.WriteString(m.theme.Dim.Render("{{project}}    Project name\n"))
-				sb.WriteString(m.theme.Dim.Render("{{cwd}}        Working directory\n"))
-			} else {
-				// Running refinement - show progress
-				sb.WriteString(m.theme.Normal.Render("Refining prompt with Claude...\n\n"))
-				sb.WriteString(m.theme.Dim.Render("◐ Working..."))
-				sb.WriteString("\n\n" + m.theme.Dim.Render("Esc:cancel"))
-			}
-		} else {
-			// Refinement complete, waiting for nvim
-			sb.WriteString(m.theme.Title.Render("✓ Refinement complete!\n\n"))
-			sb.WriteString(m.theme.Dim.Render("Reviewing changes in nvim...\n\n"))
-			sb.WriteString(m.theme.Dim.Render("Please wait for diff view to close"))
-		}
-
-		return sb.String()
-	}
-
 	// Show fuzzy filter overlay when active
 	if m.promptFuzzyActive {
 		sb.WriteString(m.theme.Title.Render("Filter Prompts") + "\n")
@@ -4479,7 +4307,6 @@ func (m Model) renderHelp() string {
 			help.WriteString(fmt.Sprintf("    %-14s New project prompt\n", k.NewPrompt))
 			help.WriteString(fmt.Sprintf("    %-14s New global prompt\n", k.NewGlobalPrompt))
 			help.WriteString(fmt.Sprintf("    %-14s Edit selected prompt\n", k.EditPrompt))
-			help.WriteString(fmt.Sprintf("    %-14s Refine with Claude CLI\n", k.RefinePrompt))
 			help.WriteString(fmt.Sprintf("    %-14s Create version backup\n", k.CreateVersion))
 			help.WriteString(fmt.Sprintf("    %-14s View all versions\n", k.ViewVersions))
 			help.WriteString(fmt.Sprintf("    %-14s Delete prompt\n", k.DeletePrompt))
@@ -4503,7 +4330,6 @@ func (m Model) renderHelp() string {
 			help.WriteString(fmt.Sprintf("    %-14s Edit plan in nvim\n", k.EditPlan))
 		}
 		help.WriteString(fmt.Sprintf("    %-14s Refresh plan\n", k.Refresh))
-		help.WriteString(fmt.Sprintf("    %-14s Open Plan chat\n", k.ChatPlan))
 		help.WriteString(fmt.Sprintf("    %-14s Scroll plan content\n\n", k.Down+"/"+k.Up+"/"+k.PageDown+"/"+k.PageUp))
 	}
 
@@ -4579,20 +4405,17 @@ func (m Model) renderWhichKey() string {
 				{Key: "n", Description: "new prompt"},
 				{Key: "N", Description: "new global prompt"},
 				{Key: "e", Description: "edit selected"},
-				{Key: "r", Description: "refine with AI"},
 				{Key: "y", Description: "yank to clipboard"},
 				{Key: "d", Description: "delete prompt"},
 				{Key: "i", Description: "injection method"},
 				{Key: "⏎", Description: "inject prompt"},
 				{Key: "s", Description: "run as objective"},
-				{Key: "P", Description: "prompt chat"},
 			}
 		case LeftPaneModeRalph:
 			context = "RALPH LOOP"
 			contextItems = []WhichKeyItem{
 				{Key: "C", Description: "cancel loop"},
 				{Key: "r", Description: "refresh status"},
-				{Key: "R", Description: "ralph chat"},
 			}
 		case LeftPaneModePlan:
 			context = "PLAN"
@@ -4601,7 +4424,6 @@ func (m Model) renderWhichKey() string {
 				{Key: "e", Description: "edit in nvim"},
 				{Key: "r", Description: "refresh view"},
 				{Key: "s", Description: "run plan"},
-				{Key: "A", Description: "plan chat"},
 			}
 		case LeftPaneModeContext:
 			context = "CONTEXT"
@@ -4693,7 +4515,6 @@ func (m Model) renderWhichKey() string {
 	globalItems := []WhichKeyItem{
 		{Key: "h", Description: "toggle pane"},
 		{Key: "m", Description: "toggle minimap"},
-		{Key: "c", Description: "toggle chat"},
 		{Key: "1-4", Description: "switch mode"},
 		{Key: "?", Description: "full help"},
 		{Key: "q", Description: "quit"},
@@ -5218,142 +5039,6 @@ func (m *Model) editPrompt(p prompt.Prompt) (Model, tea.Cmd) {
 	return *m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return promptEditedMsg{path: p.Path}
 	})
-}
-
-// refinePrompt activates input mode for collecting user's refinement request
-func (m *Model) refinePrompt(p prompt.Prompt) (Model, tea.Cmd) {
-	// Auto-create version backup before refining
-	if m.promptStore != nil {
-		if err := m.promptStore.CreateVersion(&p); err != nil {
-			logger.Log("Failed to create version before refine: %v", err)
-		} else {
-			logger.Log("Created version backup v%d before refine", p.Version)
-		}
-	}
-
-	// Store the prompt being refined and activate input mode
-	m.promptRefining = true
-	m.promptRefiningPrompt = &p
-	m.promptRefineInput.Focus()
-	m.promptRefineInput.Reset()
-
-	return *m, textinput.Blink
-}
-
-// executePromptRefinement runs Claude CLI to refine the prompt
-func (m *Model) executePromptRefinement(request string) tea.Cmd {
-	return func() tea.Msg {
-		p := m.promptRefiningPrompt
-		if p == nil {
-			return promptRefineErrorMsg{err: fmt.Errorf("no prompt to refine")}
-		}
-
-		// Build refinement meta-prompt with template variables
-		metaPrompt := m.buildRefinementMetaPrompt(*p, request)
-
-		// Run Claude CLI with -p flag for print mode (non-interactive)
-		cmd := exec.Command("claude", "-p", metaPrompt)
-		cmd.Env = append(os.Environ(), "CLAUDE_CODE_ENTRYPOINT=cli")
-
-		// Mark that refinement is running
-		m.promptRefiningCmd = cmd
-
-		output, err := cmd.Output()
-		if err != nil {
-			// Try to get stderr for better error message
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				return promptRefineErrorMsg{err: fmt.Errorf("claude CLI failed: %s", string(exitErr.Stderr))}
-			}
-			return promptRefineErrorMsg{err: fmt.Errorf("claude CLI failed: %w", err)}
-		}
-
-		// Clean up output - trim whitespace and any markdown code fences
-		refined := strings.TrimSpace(string(output))
-		refined = strings.TrimPrefix(refined, "```")
-		refined = strings.TrimSuffix(refined, "```")
-		refined = strings.TrimSpace(refined)
-
-		return promptRefineCompleteMsg{output: refined}
-	}
-}
-
-// buildRefinementMetaPrompt creates a meta-prompt for Claude CLI with template variables
-func (m *Model) buildRefinementMetaPrompt(p prompt.Prompt, request string) string {
-	// Get available template variables and their current values
-	vars := m.getTemplateVariableValues()
-
-	varVars := ""
-	for name, value := range vars {
-		varVars += fmt.Sprintf("- %s: %s\n", name, value)
-	}
-
-	return fmt.Sprintf(`You are a prompt engineering expert. Improve the following prompt based on the user's request.
-
-USER'S REQUEST:
-%s
-
-AVAILABLE TEMPLATE VARIABLES:
-The prompt supports these template variables that will be expanded when used:
-%s
-
-CURRENT PROMPT:
-%s
-
-Your task:
-1. Address the user's specific request
-2. Enhance clarity, specificity, and effectiveness
-3. Consider how template variables could be better utilized
-4. Maintain compatibility with existing template variables
-
-Output ONLY the improved prompt text with no preamble, no explanations, no markdown code fences. Just the raw improved prompt that maintains YAML frontmatter format.`, request, varVars, p.Content)
-}
-
-// getTemplateVariableValues returns current values for all available template variables
-func (m *Model) getTemplateVariableValues() map[string]string {
-	vars := make(map[string]string)
-
-	// Get current file info
-	var filePath, fileName string
-	if len(m.changes) > 0 && m.selectedIndex < len(m.changes) {
-		filePath = m.changes[m.selectedIndex].FilePath
-		fileName = filepath.Base(filePath)
-	}
-
-	// Get project directory
-	projectDir := ""
-	if filePath != "" {
-		projectDir = findProjectRoot(filepath.Dir(filePath))
-	}
-	if projectDir == "" && m.promptStore != nil {
-		projectDir = m.promptStore.ProjectDir()
-	}
-	if projectDir == "" {
-		projectDir, _ = os.Getwd()
-	}
-
-	projectName := filepath.Base(projectDir)
-	cwd, _ := os.Getwd()
-
-	// Populate template variables
-	vars["{{file}}"] = filePath
-	vars["{{file_name}}"] = fileName
-	vars["{{project}}"] = projectName
-	vars["{{cwd}}"] = cwd
-
-	// Plan variables
-	if m.planPath != "" {
-		vars["{{plan_name}}"] = filepath.Base(m.planPath)
-		if m.planContent != "" {
-			vars["{{plan}}"] = m.planContent
-		} else {
-			vars["{{plan}}"] = "(no plan loaded)"
-		}
-	} else {
-		vars["{{plan_name}}"] = "(none)"
-		vars["{{plan}}"] = "(none)"
-	}
-
-	return vars
 }
 
 // loadVersionList loads the list of versions for the currently selected prompt

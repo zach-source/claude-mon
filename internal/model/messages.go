@@ -12,32 +12,6 @@ type promptEditedMsg struct {
 	path string
 }
 
-// promptRefinedMsg is sent when Claude CLI finishes refining a prompt
-type promptRefinedMsg struct {
-	originalPath string
-	refinedPath  string
-}
-
-// promptRefineErrorMsg is sent when refining fails
-type promptRefineErrorMsg struct {
-	err error
-}
-
-// promptRefineInputMsg is sent when user submits refinement request
-type promptRefineInputMsg struct {
-	request string
-}
-
-// promptRefineOutputMsg is sent when Claude CLI outputs a line during refinement
-type promptRefineOutputMsg struct {
-	line string
-}
-
-// promptRefineCompleteMsg is sent when Claude CLI finishes refinement
-type promptRefineCompleteMsg struct {
-	output string
-}
-
 // planGeneratingMsg is sent when plan generation starts
 type planGeneratingMsg struct{}
 

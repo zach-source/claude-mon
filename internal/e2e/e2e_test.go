@@ -564,32 +564,6 @@ func TestEmptyState(t *testing.T) {
 	}
 }
 
-// TestChatMode verifies chat mode functionality
-func TestChatMode(t *testing.T) {
-	m := model.New("/tmp/test.sock")
-	cfg := config.DefaultConfig()
-
-	// Initialize with window size
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-	m = updated.(model.Model)
-
-	// Chat should not be active initially
-	// NOTE: Chat feature is not currently implemented, skipping these checks
-	// Open chat using toggle chat key
-	// Note: Chat may fail to start in test environment due to missing dependencies
-	// The test verifies that the key is handled and UI doesn't crash
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(cfg.Keys.ToggleChat)})
-	m = updated.(model.Model)
-
-	// View should remain renderable even if chat startup fails
-	view := m.View()
-	if view == "" {
-		t.Error("expected non-empty view after chat toggle")
-	}
-
-	// NOTE: Skipping chat state tests since ChatActive() is not implemented
-}
-
 // TestLeaderKeyMode verifies leader key functionality
 func TestLeaderKeyMode(t *testing.T) {
 	m := model.New("/tmp/test.sock")
@@ -709,99 +683,6 @@ func TestPlanModeNavigation(t *testing.T) {
 	}
 }
 
-// TestChatPanelWithTeatest uses teatest to simulate an interactive TTY session
-// This test validates the chat panel UI with proper TTY simulation
-func TestChatPanelWithTeatest(t *testing.T) {
-	// Create a model with a mock socket path
-	m := model.New("/tmp/test.sock")
-
-	// Create teatest environment with fixed terminal size
-	tm := teatest.NewTestModel(t, m,
-		teatest.WithInitialTermSize(100, 40),
-	)
-
-	// Wait for initial output (should show the TUI)
-	teatest.WaitFor(t, tm.Output(), func(bts []byte) bool {
-		return len(bts) > 0 && bytes.Contains(bts, []byte("/"))
-	}, teatest.WithCheckInterval(time.Millisecond*100), teatest.WithDuration(time.Second*2))
-
-	// Send 'c' key to open chat panel
-	cfg := config.DefaultConfig()
-	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(cfg.Keys.ToggleChat)})
-
-	// Wait for chat panel indicators in output
-	teatest.WaitFor(t, tm.Output(), func(bts []byte) bool {
-		// Look for chat-related UI elements
-		return bytes.Contains(bts, []byte("Chat")) ||
-			bytes.Contains(bts, []byte("chat")) ||
-			bytes.Contains(bts, []byte("Send"))
-	}, teatest.WithCheckInterval(time.Millisecond*100), teatest.WithDuration(time.Second*1))
-
-	// Send escape to close chat
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
-
-	// Wait a bit for the close to take effect
-	time.Sleep(time.Millisecond * 100)
-
-	// Send 'q' to quit the program
-	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
-
-	// Wait for program to finish
-	tm.WaitFinished(t, teatest.WithFinalTimeout(time.Second*2))
-
-	// Get final model and assert chat is closed
-	fm := tm.FinalModel(t)
-	finalModel, ok := fm.(model.Model)
-	if !ok {
-		t.Fatalf("final model is not model.Model: %T", fm)
-	}
-
-	// After closing chat, the model should still be valid
-	_ = finalModel
-}
-
-// TestChatInputWithTeatest tests typing in the chat input field via TTY simulation
-func TestChatInputWithTeatest(t *testing.T) {
-	m := model.New("/tmp/test.sock")
-	cfg := config.DefaultConfig()
-
-	tm := teatest.NewTestModel(t, m,
-		teatest.WithInitialTermSize(100, 40),
-	)
-
-	// Wait for initial render
-	teatest.WaitFor(t, tm.Output(), func(bts []byte) bool {
-		return len(bts) > 0
-	}, teatest.WithCheckInterval(time.Millisecond*100), teatest.WithDuration(time.Second*1))
-
-	// Open chat (may fail in test environment due to missing dependencies)
-	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(cfg.Keys.ToggleChat)})
-	time.Sleep(time.Millisecond * 50)
-
-	// Type some text
-	testInput := "hello"
-	for _, r := range testInput {
-		tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-	}
-
-	// Try to wait for output to reflect the input
-	// If chat didn't start (due to missing dependencies), we'll just close after a delay
-	time.Sleep(time.Millisecond * 200)
-
-	// Close chat (if it started)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
-
-	// Send 'q' to quit the program
-	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
-
-	// Wait for program to finish
-	tm.WaitFinished(t, teatest.WithFinalTimeout(time.Second*2))
-
-	// Get final model state
-	fm := tm.FinalModel(t)
-	_ = fm.(model.Model)
-}
-
 // TestLeaderKeyWithTeatest tests leader key mode with TTY simulation
 func TestLeaderKeyWithTeatest(t *testing.T) {
 	m := model.New("/tmp/test.sock")
@@ -887,32 +768,5 @@ func TestLeaderKeyTimeout(t *testing.T) {
 	view := m.View()
 	if view == "" {
 		t.Error("expected non-empty view after leader timeout")
-	}
-}
-
-// TestChatInput verifies chat input field works
-func TestChatInput(t *testing.T) {
-	m := model.New("/tmp/test.sock")
-	cfg := config.DefaultConfig()
-
-	// Initialize with window size
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-	m = updated.(model.Model)
-
-	// Open chat
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(cfg.Keys.ToggleChat)})
-	m = updated.(model.Model)
-
-	// Type some text
-	testInput := "hello world"
-	for _, r := range testInput {
-		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-		m = updated.(model.Model)
-	}
-
-	// View should still render
-	view := m.View()
-	if view == "" {
-		t.Error("expected non-empty view after typing in chat")
 	}
 }

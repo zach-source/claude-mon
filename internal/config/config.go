@@ -24,7 +24,6 @@ type KeyBindings struct {
 	LeftPane       string `toml:"left_pane"`
 	RightPane      string `toml:"right_pane"`
 	ToggleMinimap  string `toml:"toggle_minimap"`
-	ToggleChat     string `toml:"toggle_chat"`
 	ToggleLeftPane string `toml:"toggle_left_pane"`
 
 	// Navigation
@@ -46,7 +45,6 @@ type KeyBindings struct {
 	NewPrompt       string `toml:"new_prompt"`
 	NewGlobalPrompt string `toml:"new_global_prompt"`
 	EditPrompt      string `toml:"edit_prompt"`
-	RefinePrompt    string `toml:"refine_prompt"`
 	DeletePrompt    string `toml:"delete_prompt"`
 	YankPrompt      string `toml:"yank_prompt"`
 	InjectMethod    string `toml:"inject_method"`
@@ -62,17 +60,6 @@ type KeyBindings struct {
 	// Plan mode
 	GeneratePlan string `toml:"generate_plan"`
 	EditPlan     string `toml:"edit_plan"`
-
-	// Chat mode
-	SendChat  string `toml:"send_chat"`
-	CloseChat string `toml:"close_chat"`
-	KillChat  string `toml:"kill_chat"`
-	ClearChat string `toml:"clear_chat"`
-
-	// Context-aware chat keys
-	ChatRalph  string `toml:"chat_ralph"`  // Open Ralph chat
-	ChatPrompt string `toml:"chat_prompt"` // Open Prompt chat
-	ChatPlan   string `toml:"chat_plan"`   // Open Plan chat
 }
 
 // DefaultConfig returns a config with default values
@@ -89,7 +76,6 @@ func DefaultConfig() *Config {
 			LeftPane:       "[",
 			RightPane:      "]",
 			ToggleMinimap:  "m",
-			ToggleChat:     "c",
 			ToggleLeftPane: "h",
 
 			// Navigation
@@ -111,7 +97,6 @@ func DefaultConfig() *Config {
 			NewPrompt:       "n",
 			NewGlobalPrompt: "N",
 			EditPrompt:      "e",
-			RefinePrompt:    "r",
 			DeletePrompt:    "ctrl+d",
 			YankPrompt:      "y",
 			InjectMethod:    "i",
@@ -127,17 +112,6 @@ func DefaultConfig() *Config {
 			// Plan mode
 			GeneratePlan: "G",
 			EditPlan:     "e",
-
-			// Chat mode
-			SendChat:  "enter",
-			CloseChat: "esc",
-			KillChat:  "ctrl+c",
-			ClearChat: "ctrl+l",
-
-			// Context-aware chat
-			ChatRalph:  "R", // Open Ralph Loop chat
-			ChatPrompt: "P", // Open Prompt chat
-			ChatPlan:   "A", // Open Plan chat (A for "Ask about plan")
 		},
 	}
 }
@@ -208,7 +182,6 @@ prev_tab = "shift+tab"
 left_pane = "["
 right_pane = "]"
 toggle_minimap = "m"
-toggle_chat = "c"
 toggle_left_pane = "h"
 
 # Navigation (used in multiple modes)
@@ -230,7 +203,6 @@ scroll_right = "right"
 new_prompt = "n"
 new_global_prompt = "N"
 edit_prompt = "e"
-refine_prompt = "r"
 delete_prompt = "ctrl+d"
 yank_prompt = "y"
 inject_method = "i"
@@ -246,12 +218,6 @@ refresh = "r"
 # Plan mode
 generate_plan = "G"
 edit_plan = "e"
-
-# Chat mode
-send_chat = "enter"
-close_chat = "esc"
-kill_chat = "ctrl+c"
-clear_chat = "ctrl+l"
 `
 
 	return os.WriteFile(Path(), []byte(defaultConfig), 0644)

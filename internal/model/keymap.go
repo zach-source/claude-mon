@@ -17,7 +17,6 @@ type KeyMap struct {
 	LeftPane       key.Binding
 	RightPane      key.Binding
 	ToggleMinimap  key.Binding
-	ToggleChat     key.Binding
 	ToggleLeftPane key.Binding
 
 	// Navigation
@@ -39,7 +38,6 @@ type KeyMap struct {
 	NewPrompt       key.Binding
 	NewGlobalPrompt key.Binding
 	EditPrompt      key.Binding
-	RefinePrompt    key.Binding
 	DeletePrompt    key.Binding
 	YankPrompt      key.Binding
 	InjectMethod    key.Binding
@@ -57,17 +55,6 @@ type KeyMap struct {
 	// Plan mode
 	GeneratePlan key.Binding
 	EditPlan     key.Binding
-
-	// Chat mode
-	SendChat  key.Binding
-	CloseChat key.Binding
-	KillChat  key.Binding
-	ClearChat key.Binding
-
-	// Context-aware chat
-	ChatRalph  key.Binding
-	ChatPrompt key.Binding
-	ChatPlan   key.Binding
 }
 
 // NewKeyMap creates a KeyMap with default bindings
@@ -81,7 +68,6 @@ func NewKeyMap() KeyMap {
 		LeftPane:       key.NewBinding(key.WithKeys("["), key.WithHelp("[", "left pane")),
 		RightPane:      key.NewBinding(key.WithKeys("]"), key.WithHelp("]", "right pane")),
 		ToggleMinimap:  key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "minimap")),
-		ToggleChat:     key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "chat")),
 		ToggleLeftPane: key.NewBinding(key.WithKeys("h"), key.WithHelp("h", "toggle left")),
 
 		// Navigation
@@ -103,7 +89,6 @@ func NewKeyMap() KeyMap {
 		NewPrompt:       key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new prompt")),
 		NewGlobalPrompt: key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "new global")),
 		EditPrompt:      key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
-		RefinePrompt:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refine")),
 		DeletePrompt:    key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("C-d", "delete")),
 		YankPrompt:      key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yank")),
 		InjectMethod:    key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "inject")),
@@ -121,17 +106,6 @@ func NewKeyMap() KeyMap {
 		// Plan mode
 		GeneratePlan: key.NewBinding(key.WithKeys("G"), key.WithHelp("G", "generate plan")),
 		EditPlan:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit plan")),
-
-		// Chat mode
-		SendChat:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("⏎", "send")),
-		CloseChat: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "close")),
-		KillChat:  key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("C-c", "kill")),
-		ClearChat: key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("C-l", "clear")),
-
-		// Context-aware chat
-		ChatRalph:  key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "ralph chat")),
-		ChatPrompt: key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "prompt chat")),
-		ChatPlan:   key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "plan chat")),
 	}
 }
 
@@ -160,9 +134,6 @@ func FromConfig(cfg *config.Config) KeyMap {
 	}
 	if cfg.Keys.ToggleMinimap != "" {
 		km.ToggleMinimap = key.NewBinding(key.WithKeys(cfg.Keys.ToggleMinimap), key.WithHelp(cfg.Keys.ToggleMinimap, "minimap"))
-	}
-	if cfg.Keys.ToggleChat != "" {
-		km.ToggleChat = key.NewBinding(key.WithKeys(cfg.Keys.ToggleChat), key.WithHelp(cfg.Keys.ToggleChat, "chat"))
 	}
 	if cfg.Keys.ToggleLeftPane != "" {
 		km.ToggleLeftPane = key.NewBinding(key.WithKeys(cfg.Keys.ToggleLeftPane), key.WithHelp(cfg.Keys.ToggleLeftPane, "toggle left"))
@@ -215,9 +186,6 @@ func FromConfig(cfg *config.Config) KeyMap {
 	if cfg.Keys.EditPrompt != "" {
 		km.EditPrompt = key.NewBinding(key.WithKeys(cfg.Keys.EditPrompt), key.WithHelp(cfg.Keys.EditPrompt, "edit"))
 	}
-	if cfg.Keys.RefinePrompt != "" {
-		km.RefinePrompt = key.NewBinding(key.WithKeys(cfg.Keys.RefinePrompt), key.WithHelp(cfg.Keys.RefinePrompt, "refine"))
-	}
 	if cfg.Keys.DeletePrompt != "" {
 		km.DeletePrompt = key.NewBinding(key.WithKeys(cfg.Keys.DeletePrompt), key.WithHelp(cfg.Keys.DeletePrompt, "delete"))
 	}
@@ -256,31 +224,6 @@ func FromConfig(cfg *config.Config) KeyMap {
 		km.EditPlan = key.NewBinding(key.WithKeys(cfg.Keys.EditPlan), key.WithHelp(cfg.Keys.EditPlan, "edit plan"))
 	}
 
-	// Chat mode
-	if cfg.Keys.SendChat != "" {
-		km.SendChat = key.NewBinding(key.WithKeys(cfg.Keys.SendChat), key.WithHelp(cfg.Keys.SendChat, "send"))
-	}
-	if cfg.Keys.CloseChat != "" {
-		km.CloseChat = key.NewBinding(key.WithKeys(cfg.Keys.CloseChat), key.WithHelp(cfg.Keys.CloseChat, "close"))
-	}
-	if cfg.Keys.KillChat != "" {
-		km.KillChat = key.NewBinding(key.WithKeys(cfg.Keys.KillChat), key.WithHelp(cfg.Keys.KillChat, "kill"))
-	}
-	if cfg.Keys.ClearChat != "" {
-		km.ClearChat = key.NewBinding(key.WithKeys(cfg.Keys.ClearChat), key.WithHelp(cfg.Keys.ClearChat, "clear"))
-	}
-
-	// Context-aware chat
-	if cfg.Keys.ChatRalph != "" {
-		km.ChatRalph = key.NewBinding(key.WithKeys(cfg.Keys.ChatRalph), key.WithHelp(cfg.Keys.ChatRalph, "ralph chat"))
-	}
-	if cfg.Keys.ChatPrompt != "" {
-		km.ChatPrompt = key.NewBinding(key.WithKeys(cfg.Keys.ChatPrompt), key.WithHelp(cfg.Keys.ChatPrompt, "prompt chat"))
-	}
-	if cfg.Keys.ChatPlan != "" {
-		km.ChatPlan = key.NewBinding(key.WithKeys(cfg.Keys.ChatPlan), key.WithHelp(cfg.Keys.ChatPlan, "plan chat"))
-	}
-
 	return km
 }
 
@@ -297,7 +240,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		// Row 2: Movement
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Next, k.Prev},
 		// Row 3: Actions
-		{k.ToggleChat, k.ToggleMinimap, k.Help, k.Quit},
+		{k.ToggleMinimap, k.Help, k.Quit},
 	}
 }
 
@@ -315,7 +258,7 @@ func (k KeyMap) PromptsHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.SendPrompt, k.EditPrompt},
 		{k.NewPrompt, k.NewGlobalPrompt, k.DeletePrompt},
-		{k.RefinePrompt, k.YankPrompt, k.InjectMethod},
+		{k.YankPrompt, k.InjectMethod},
 		{k.CreateVersion, k.ViewVersions, k.RevertVersion},
 		{k.FilterPrompts, k.FilterScope},
 	}
@@ -325,7 +268,7 @@ func (k KeyMap) PromptsHelp() [][]key.Binding {
 func (k KeyMap) RalphHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown},
-		{k.CancelRalph, k.Refresh, k.ChatRalph},
+		{k.CancelRalph, k.Refresh},
 	}
 }
 
@@ -333,14 +276,7 @@ func (k KeyMap) RalphHelp() [][]key.Binding {
 func (k KeyMap) PlanHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown},
-		{k.GeneratePlan, k.EditPlan, k.ChatPlan},
-	}
-}
-
-// ChatHelp returns keybindings relevant to chat mode
-func (k KeyMap) ChatHelp() [][]key.Binding {
-	return [][]key.Binding{
-		{k.SendChat, k.CloseChat, k.KillChat, k.ClearChat},
+		{k.GeneratePlan, k.EditPlan},
 	}
 }
 
@@ -375,8 +311,6 @@ func (m ModeKeyMap) FullHelp() [][]key.Binding {
 		return m.KeyMap.PlanHelp()
 	case "context":
 		return m.KeyMap.ContextHelp()
-	case "chat":
-		return m.KeyMap.ChatHelp()
 	default:
 		return m.KeyMap.FullHelp()
 	}
