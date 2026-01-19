@@ -230,11 +230,13 @@ func TestContextFormatForInjection(t *testing.T) {
 		t.Errorf("Missing Git context in: %s", formatted)
 	}
 
-	if !contains(formatted, "Env: ENV=dev, DEBUG=true") {
+	// Check for Env section with both key=value pairs (order may vary due to map iteration)
+	if !contains(formatted, "Env:") || !contains(formatted, "ENV=dev") || !contains(formatted, "DEBUG=true") {
 		t.Errorf("Missing Env in: %s", formatted)
 	}
 
-	if !contains(formatted, "Custom: KEY1=value1, KEY2=value2") {
+	// Check for Custom section with both key=value pairs (order may vary due to map iteration)
+	if !contains(formatted, "Custom:") || !contains(formatted, "KEY1=value1") || !contains(formatted, "KEY2=value2") {
 		t.Errorf("Missing Custom in: %s", formatted)
 	}
 
