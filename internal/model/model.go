@@ -1990,6 +1990,56 @@ func (m Model) handleLeaderKeyContext(key string) (tea.Model, tea.Cmd) {
 		m.customInput.Reset()
 		m.customInput.Focus()
 		return m, textinput.Blink
+	case "K":
+		// Clear Kubernetes context
+		if m.contextCurrent != nil {
+			m.contextCurrent.Clear("kubernetes")
+			if err := m.contextCurrent.Save(); err != nil {
+				m.addToast(fmt.Sprintf("Failed to clear k8s: %v", err), ToastError)
+			} else {
+				m.addToast("Kubernetes context cleared", ToastSuccess)
+			}
+		}
+	case "A":
+		// Clear AWS context
+		if m.contextCurrent != nil {
+			m.contextCurrent.Clear("aws")
+			if err := m.contextCurrent.Save(); err != nil {
+				m.addToast(fmt.Sprintf("Failed to clear AWS: %v", err), ToastError)
+			} else {
+				m.addToast("AWS context cleared", ToastSuccess)
+			}
+		}
+	case "G":
+		// Clear Git context
+		if m.contextCurrent != nil {
+			m.contextCurrent.Clear("git")
+			if err := m.contextCurrent.Save(); err != nil {
+				m.addToast(fmt.Sprintf("Failed to clear Git: %v", err), ToastError)
+			} else {
+				m.addToast("Git context cleared", ToastSuccess)
+			}
+		}
+	case "E":
+		// Clear environment variables
+		if m.contextCurrent != nil {
+			m.contextCurrent.Clear("env")
+			if err := m.contextCurrent.Save(); err != nil {
+				m.addToast(fmt.Sprintf("Failed to clear env: %v", err), ToastError)
+			} else {
+				m.addToast("Environment variables cleared", ToastSuccess)
+			}
+		}
+	case "X":
+		// Clear custom values
+		if m.contextCurrent != nil {
+			m.contextCurrent.Clear("custom")
+			if err := m.contextCurrent.Save(); err != nil {
+				m.addToast(fmt.Sprintf("Failed to clear custom: %v", err), ToastError)
+			} else {
+				m.addToast("Custom values cleared", ToastSuccess)
+			}
+		}
 	case "C":
 		// Clear all context
 		if m.contextCurrent != nil {
@@ -4561,6 +4611,11 @@ func (m Model) renderWhichKey() string {
 				{Key: "g", Description: "set Git"},
 				{Key: "e", Description: "set Env var"},
 				{Key: "c", Description: "set Custom"},
+				{Key: "K", Description: "clear K8s"},
+				{Key: "A", Description: "clear AWS"},
+				{Key: "G", Description: "clear Git"},
+				{Key: "E", Description: "clear Env"},
+				{Key: "X", Description: "clear Custom"},
 				{Key: "C", Description: "clear all"},
 				{Key: "r", Description: "reload"},
 				{Key: "l", Description: "list all"},
