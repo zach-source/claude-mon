@@ -791,6 +791,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.contextEditMode {
 			switch key {
 			case "enter":
+				// If completion overlay is active, select the completion
+				if m.contextCompletionActive {
+					if len(m.contextCompletionMatches) > 0 && m.contextCompletionSelected < len(m.contextCompletionMatches) {
+						idx := m.contextCompletionMatches[m.contextCompletionSelected]
+						selected := m.contextCompletionCandidates[idx]
+						m.setCurrentContextFieldValue(selected)
+					}
+					m.contextCompletionActive = false
+					m.contextCompletionInput.Reset()
+					m.contextCompletionInput.Blur()
+					return m, nil
+				}
 				// Save the edited value based on context type
 				m.saveContextEdit()
 				m.contextEditMode = false
@@ -846,18 +858,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						return m, nil
 					default:
-						// Check if this is Enter to select completion
-						if key == "enter" {
-							if len(m.contextCompletionMatches) > 0 && m.contextCompletionSelected < len(m.contextCompletionMatches) {
-								idx := m.contextCompletionMatches[m.contextCompletionSelected]
-								selected := m.contextCompletionCandidates[idx]
-								m.setCurrentContextFieldValue(selected)
-							}
-							m.contextCompletionActive = false
-							m.contextCompletionInput.Reset()
-							m.contextCompletionInput.Blur()
-							return m, nil
-						}
 						// Forward to completion filter input
 						var cmd tea.Cmd
 						m.contextCompletionInput, cmd = m.contextCompletionInput.Update(msg)
