@@ -822,8 +822,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Move to previous field
 				m.prevContextField()
 				return m, nil
-			case "ctrl+space":
-				// Open completion for current field
+			case "ctrl+@":
+				// Open completion for current field (ctrl+space)
 				if !m.contextCompletionActive {
 					m.loadContextCompletions()
 					m.contextCompletionActive = true
@@ -2829,7 +2829,7 @@ func (m Model) renderContextEditPopup() string {
 		content.WriteString(m.theme.Dim.Render("↑/↓:navigate  Enter:select  Esc:close"))
 	} else {
 		content.WriteString("\n")
-		content.WriteString(m.theme.Dim.Render("Tab:next field  Ctrl+Space:autocomplete  Enter:save  Esc:cancel"))
+		content.WriteString(m.theme.Dim.Render("Tab:next  Ctrl+@:complete  Enter:save  Esc:cancel"))
 	}
 
 	// Wrap content in a bordered box
