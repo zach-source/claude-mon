@@ -3417,9 +3417,12 @@ func (m *Model) saveContextEdit() {
 
 // listVisibleItems returns the number of items that can fit in the history list view
 func (m Model) listVisibleItems() int {
-	// Account for header (2 lines: title + separator) and footer indicator
-	listHeight := m.height - 6 // status bar, tabs, header, margins
-	availableHeight := listHeight - 3
+	// Left pane height is (m.height - 4), minus 2 for border = inner content height
+	// Then subtract: header (2 lines: title + separator), scroll indicators (2 lines max)
+	innerHeight := m.height - 4 - 2 // pane height minus border
+	headerLines := 2                // "History (N)" + separator
+	scrollIndicators := 2           // potential ↑ more... and ↓ more...
+	availableHeight := innerHeight - headerLines - scrollIndicators
 	if availableHeight < 1 {
 		return 1
 	}
@@ -3473,9 +3476,10 @@ func (m Model) renderHistory() string {
 	// Calculate visible items (account for header: title + separator = 2 lines)
 	visibleItems := m.listVisibleItems()
 	totalItems := len(m.changes)
+	isScrollable := totalItems > visibleItems
 
 	// Show scroll indicator in header if scrollable
-	if totalItems > visibleItems {
+	if isScrollable {
 		scrollInfo := fmt.Sprintf(" [%d-%d/%d]", m.listScrollOffset+1,
 			min(m.listScrollOffset+visibleItems, totalItems), totalItems)
 		sb.WriteString(m.theme.Dim.Render(fmt.Sprintf("History (%d)%s\n", totalItems, scrollInfo)))
@@ -3483,6 +3487,11 @@ func (m Model) renderHistory() string {
 		sb.WriteString(m.theme.Dim.Render(fmt.Sprintf("History (%d)\n", totalItems)))
 	}
 	sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", 20)) + "\n")
+
+	// Show scroll indicator at top if scrolled down
+	if m.listScrollOffset > 0 {
+		sb.WriteString(m.theme.Dim.Render("  ↑ more...") + "\n")
+	}
 
 	// Calculate available width for path in history pane
 	historyWidth := m.width / 3
@@ -3498,6 +3507,16 @@ func (m Model) renderHistory() string {
 	endVisual := startVisual + visibleItems
 	if endVisual > totalItems {
 		endVisual = totalItems
+	}
+
+	// Adjust visible items if showing top scroll indicator
+	actualVisibleItems := visibleItems
+	if m.listScrollOffset > 0 {
+		actualVisibleItems-- // One line taken by ↑ more...
+		endVisual = startVisual + actualVisibleItems
+		if endVisual > totalItems {
+			endVisual = totalItems
+		}
 	}
 
 	// Iterate through visible items (newest first in display)
@@ -3544,7 +3563,7 @@ func (m Model) renderHistory() string {
 	}
 
 	// Show scroll indicator at bottom if there's more content
-	if m.listScrollOffset+visibleItems < totalItems {
+	if m.listScrollOffset+actualVisibleItems < totalItems {
 		sb.WriteString(m.theme.Dim.Render("  ↓ more...") + "\n")
 	}
 
