@@ -48,6 +48,7 @@ type Change struct {
 }
 
 // HookPayload matches the JSON structure from the Claude hook
+// Supports both nested format (tool_input/parameters) and flat format (direct fields)
 type HookPayload struct {
 	ToolName  string `json:"tool_name"`
 	ToolInput struct {
@@ -63,6 +64,11 @@ type HookPayload struct {
 		OldString string `json:"old_string"`
 		NewString string `json:"new_string"`
 	} `json:"parameters"`
+	// Flat format fields (used by daemon notifications)
+	FilePath  string `json:"file_path"`
+	OldString string `json:"old_string"`
+	NewString string `json:"new_string"`
+	Content   string `json:"content"`
 }
 
 // Pane represents which pane is active
@@ -329,9 +335,9 @@ func New(socketPath string, opts ...Option) Model {
 				})
 			}
 			logger.Log("Loaded %d history entries", len(m.changes))
-			// Select most recent (last) item
+			// Select most recent (first) item - data sorted newest first
 			if len(m.changes) > 0 {
-				m.selectedIndex = len(m.changes) - 1
+				m.selectedIndex = 0
 			}
 		}
 	}
@@ -522,6 +528,7 @@ func (m Model) queryDaemonHistoryCmd() tea.Cmd {
 
 		// Convert edits to changes
 		var changes []Change
+		var withContent, withoutContent int
 		for _, edit := range result.Edits {
 			change := Change{
 				Timestamp:   edit.CreatedAt,
@@ -535,6 +542,12 @@ func (m Model) queryDaemonHistoryCmd() tea.Cmd {
 				VCSType:     edit.VCSType,
 				FileContent: edit.FileContent,
 			}
+			// Track content stats for debugging
+			if edit.FileContent != "" {
+				withContent++
+			} else {
+				withoutContent++
+			}
 			// Set short commit SHA for display
 			if len(edit.CommitSHA) >= 8 {
 				change.CommitShort = edit.CommitSHA[:8]
@@ -544,7 +557,7 @@ func (m Model) queryDaemonHistoryCmd() tea.Cmd {
 			changes = append(changes, change)
 		}
 
-		logger.Log("Loaded %d edits from daemon", len(changes))
+		logger.Log("Loaded %d edits from daemon (%d with file_content, %d without)", len(changes), withContent, withoutContent)
 		return daemonHistoryMsg{changes: changes}
 	}
 }
@@ -930,8 +943,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			change.VCSType = vcsType
 
 			logger.Log("Parsed change: %s %s (line %d) commit=%s fileContent=%d bytes", change.ToolName, change.FilePath, change.LineNum, shortSHA, len(change.FileContent))
-			// Append new change to end of list (queue style)
-			m.changes = append(m.changes, *change)
+			// Prepend new change to start of list (newest first)
+			m.changes = append([]Change{*change}, m.changes...)
 			logger.Log("Total changes now: %d, selectedIndex: %d", len(m.changes), m.selectedIndex)
 
 			// Save to history if persistence enabled
@@ -953,8 +966,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-			// Select the newly added change (most recent, at top of visual list)
-			m.selectedIndex = len(m.changes) - 1
+			// Select the newly added change (most recent, at index 0)
+			m.selectedIndex = 0
 			m.scrollX = 0
 			m.listScrollOffset = 0 // Keep newest visible at top
 			m.ensureSelectedVisible()
@@ -1036,16 +1049,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				existingPaths[key] = true
 			}
 
+			// Prepend new changes to maintain newest-first order
+			var newChanges []Change
 			for _, c := range msg.changes {
 				key := fmt.Sprintf("%s:%s:%d", c.FilePath, c.Timestamp.Format(time.RFC3339), c.LineNum)
 				if !existingPaths[key] {
-					m.changes = append(m.changes, c)
+					newChanges = append(newChanges, c)
 				}
 			}
+			// Prepend daemon changes (already sorted newest first)
+			m.changes = append(newChanges, m.changes...)
 
-			// Select most recent (newest is at highest index)
+			// Select most recent (newest is at index 0)
 			if len(m.changes) > 0 {
-				m.selectedIndex = len(m.changes) - 1
+				m.selectedIndex = 0
 				m.listScrollOffset = 0 // Start at top showing newest
 				m.ensureSelectedVisible()
 				m.diffViewport.SetContent(m.renderDiff())
@@ -1076,10 +1093,10 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case m.config.Keys.Down, "down":
 		if m.activePane == PaneLeft {
-			// Navigate history list down (older items = lower index)
-			// Data is oldest-first, display is newest-first (reversed)
-			if len(m.changes) > 0 && m.selectedIndex > 0 {
-				m.selectedIndex--
+			// Navigate history list down (to older items = higher index)
+			// Data is newest-first: index 0 = newest, index N-1 = oldest
+			if len(m.changes) > 0 && m.selectedIndex < len(m.changes)-1 {
+				m.selectedIndex++
 				m.scrollX = 0
 				m.ensureSelectedVisible()
 				m.diffViewport.SetContent(m.renderDiff())
@@ -1091,9 +1108,9 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case m.config.Keys.Up, "up":
 		if m.activePane == PaneLeft {
-			// Navigate history list up (newer items = higher index)
-			if len(m.changes) > 0 && m.selectedIndex < len(m.changes)-1 {
-				m.selectedIndex++
+			// Navigate history list up (to newer items = lower index)
+			if len(m.changes) > 0 && m.selectedIndex > 0 {
+				m.selectedIndex--
 				m.scrollX = 0
 				m.ensureSelectedVisible()
 				m.diffViewport.SetContent(m.renderDiff())
@@ -1105,10 +1122,10 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case m.config.Keys.PageDown:
 		if m.activePane == PaneLeft {
-			// Page down in history list (older items = lower indices)
+			// Page down in history list (to older items = higher indices)
 			visibleItems := m.listVisibleItems()
-			for i := 0; i < visibleItems && m.selectedIndex > 0; i++ {
-				m.selectedIndex--
+			for i := 0; i < visibleItems && m.selectedIndex < len(m.changes)-1; i++ {
+				m.selectedIndex++
 			}
 			m.scrollX = 0
 			m.ensureSelectedVisible()
@@ -1120,10 +1137,10 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case m.config.Keys.PageUp:
 		if m.activePane == PaneLeft {
-			// Page up in history list (newer items = higher indices)
+			// Page up in history list (to newer items = lower indices)
 			visibleItems := m.listVisibleItems()
-			for i := 0; i < visibleItems && m.selectedIndex < len(m.changes)-1; i++ {
-				m.selectedIndex++
+			for i := 0; i < visibleItems && m.selectedIndex > 0; i++ {
+				m.selectedIndex--
 			}
 			m.scrollX = 0
 			m.ensureSelectedVisible()
@@ -1134,9 +1151,9 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.diffViewport.ViewUp()
 		}
 	case m.config.Keys.Next:
-		// Next change in time (older = lower index)
-		if len(m.changes) > 0 && m.selectedIndex > 0 {
-			m.selectedIndex--
+		// Next change in time (older = higher index)
+		if len(m.changes) > 0 && m.selectedIndex < len(m.changes)-1 {
+			m.selectedIndex++
 			m.scrollX = 0
 			m.ensureSelectedVisible()
 			m.diffViewport.SetContent(m.renderDiff())
@@ -1144,9 +1161,9 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.preloadAdjacent()
 		}
 	case m.config.Keys.Prev:
-		// Previous change in time (newer = higher index)
-		if len(m.changes) > 0 && m.selectedIndex < len(m.changes)-1 {
-			m.selectedIndex++
+		// Previous change in time (newer = lower index)
+		if len(m.changes) > 0 && m.selectedIndex > 0 {
+			m.selectedIndex--
 			m.scrollX = 0
 			m.ensureSelectedVisible()
 			m.diffViewport.SetContent(m.renderDiff())
@@ -2362,28 +2379,18 @@ func (m Model) View() string {
 		}
 	}
 
-	// Calculate pane widths based on left pane content
+	// Calculate pane widths - use fixed ratio for stability
 	var leftWidth, rightWidth int
 	if m.hideLeftPane || m.leftPaneMode == LeftPaneModeRalph || m.leftPaneMode == LeftPaneModeContext {
 		// Left pane hidden or in Ralph/Context mode (full-width right pane)
 		leftWidth = 0
 		rightWidth = m.width - 2 - minimapWidth
 	} else {
-		// Calculate content width with flexbox-like auto-sizing
-		contentWidth := lipgloss.Width(leftContent)
-
-		// Apply min/max constraints
-		minWidth := 25 // Minimum width for left pane
-		maxWidth := m.width / 2
-
-		if contentWidth < minWidth {
-			leftWidth = minWidth
-		} else if contentWidth > maxWidth {
-			leftWidth = maxWidth
-		} else {
-			leftWidth = contentWidth
+		// Fixed 1/3 width for left pane to prevent layout shifts when scrolling
+		leftWidth = m.width / 3
+		if leftWidth < 25 {
+			leftWidth = 25
 		}
-
 		// Right pane gets remaining space
 		rightWidth = m.width - leftWidth - 3 - minimapWidth
 	}
@@ -3418,11 +3425,10 @@ func (m *Model) saveContextEdit() {
 // listVisibleItems returns the number of items that can fit in the history list view
 func (m Model) listVisibleItems() int {
 	// Left pane height is (m.height - 4), minus 2 for border = inner content height
-	// Then subtract: header (2 lines: title + separator), scroll indicators (2 lines max)
+	// Then subtract header (2 lines: title + separator)
 	innerHeight := m.height - 4 - 2 // pane height minus border
 	headerLines := 2                // "History (N)" + separator
-	scrollIndicators := 2           // potential ↑ more... and ↓ more...
-	availableHeight := innerHeight - headerLines - scrollIndicators
+	availableHeight := innerHeight - headerLines
 	if availableHeight < 1 {
 		return 1
 	}
@@ -3438,10 +3444,9 @@ func (m *Model) ensureSelectedVisible() {
 	totalItems := len(m.changes)
 	visibleItems := m.listVisibleItems()
 
-	// Convert selectedIndex to visual position (list is displayed in reverse)
-	// Visual position 0 = data index len-1, visual position N = data index len-1-N
-	// So: visualPos = totalItems - 1 - selectedIndex
-	visualPos := totalItems - 1 - m.selectedIndex
+	// Data is sorted newest first (index 0 = newest = top of list)
+	// So visualPos == selectedIndex
+	visualPos := m.selectedIndex
 
 	// If selected is above visible area (scrolled past), scroll up
 	if visualPos < m.listScrollOffset {
@@ -3473,13 +3478,12 @@ func (m Model) renderHistory() string {
 
 	var sb strings.Builder
 
-	// Calculate visible items (account for header: title + separator = 2 lines)
+	// Calculate visible items
 	visibleItems := m.listVisibleItems()
 	totalItems := len(m.changes)
-	isScrollable := totalItems > visibleItems
 
-	// Show scroll indicator in header if scrollable
-	if isScrollable {
+	// Header with count and scroll position
+	if totalItems > visibleItems {
 		scrollInfo := fmt.Sprintf(" [%d-%d/%d]", m.listScrollOffset+1,
 			min(m.listScrollOffset+visibleItems, totalItems), totalItems)
 		sb.WriteString(m.theme.Dim.Render(fmt.Sprintf("History (%d)%s\n", totalItems, scrollInfo)))
@@ -3488,57 +3492,21 @@ func (m Model) renderHistory() string {
 	}
 	sb.WriteString(m.theme.Dim.Render(strings.Repeat("─", 20)) + "\n")
 
-	// Show scroll indicator at top if scrolled down
-	if m.listScrollOffset > 0 {
-		sb.WriteString(m.theme.Dim.Render("  ↑ more...") + "\n")
-	}
-
 	// Calculate available width for path in history pane
 	historyWidth := m.width / 3
 	pathWidth := historyWidth - 15 // Account for timestamp, tool, prefix
 
-	// Track current commit for grouping
-	currentCommit := ""
-
-	// Display in reverse order: newest (highest index) first
-	// listScrollOffset is visual offset from top (0 = showing newest)
-	// Visual position 0 = data index len-1, visual position N = data index len-1-N
-	startVisual := m.listScrollOffset
-	endVisual := startVisual + visibleItems
-	if endVisual > totalItems {
-		endVisual = totalItems
+	// Database returns newest first (ORDER BY timestamp DESC), so index 0 is newest
+	startIdx := m.listScrollOffset
+	endIdx := startIdx + visibleItems
+	if endIdx > totalItems {
+		endIdx = totalItems
 	}
 
-	// Adjust visible items if showing top scroll indicator
-	actualVisibleItems := visibleItems
-	if m.listScrollOffset > 0 {
-		actualVisibleItems-- // One line taken by ↑ more...
-		endVisual = startVisual + actualVisibleItems
-		if endVisual > totalItems {
-			endVisual = totalItems
-		}
-	}
-
-	// Iterate through visible items (newest first in display)
-	for visualPos := startVisual; visualPos < endVisual; visualPos++ {
-		// Convert visual position to data index (reverse mapping)
-		i := totalItems - 1 - visualPos
-		if i < 0 {
-			break
-		}
-
+	// Render visible items
+	linesRendered := 0
+	for i := startIdx; i < endIdx; i++ {
 		change := m.changes[i]
-
-		// Show commit header when commit changes
-		if change.CommitShort != "" && change.CommitShort != currentCommit {
-			currentCommit = change.CommitShort
-			vcsLabel := change.VCSType
-			if vcsLabel == "" {
-				vcsLabel = "commit"
-			}
-			commitHeader := fmt.Sprintf("── %s:%s ──", vcsLabel, change.CommitShort)
-			sb.WriteString(m.theme.DiffHeader.Render(commitHeader) + "\n")
-		}
 
 		var line string
 		if i == m.selectedIndex {
@@ -3560,11 +3528,13 @@ func (m Model) renderHistory() string {
 				truncatePath(change.FilePath, pathWidth))
 			sb.WriteString(m.theme.Normal.Render("  "+line) + "\n")
 		}
+		linesRendered++
 	}
 
-	// Show scroll indicator at bottom if there's more content
-	if m.listScrollOffset+actualVisibleItems < totalItems {
-		sb.WriteString(m.theme.Dim.Render("  ↓ more...") + "\n")
+	// Pad with empty lines to maintain consistent height
+	for linesRendered < visibleItems {
+		sb.WriteString("\n")
+		linesRendered++
 	}
 
 	return sb.String()
@@ -3973,7 +3943,7 @@ func (m *Model) renderPromptPreview() string {
 	return sb.String()
 }
 
-// renderFileWithChange shows the full file with the changed section highlighted
+// renderFileWithChange shows file context around the changed section
 func (m *Model) renderFileWithChange(change Change) string {
 	var sb strings.Builder
 
@@ -3985,17 +3955,27 @@ func (m *Model) renderFileWithChange(change Change) string {
 	changeStart := change.LineNum - 1 // 0-indexed
 	changeEnd := changeStart + len(oldLines)
 
-	// Track total lines for minimap
-	m.totalLines = len(fileLines) + len(newLines)
+	// Limit context to 100 lines before and after the change for performance
+	const contextLines = 100
+	renderStart := changeStart - contextLines
+	if renderStart < 0 {
+		renderStart = 0
+	}
+	renderEnd := changeEnd + contextLines
+	if renderEnd > len(fileLines) {
+		renderEnd = len(fileLines)
+	}
+
+	// Track total lines for minimap (just the window we're showing)
+	m.totalLines = renderEnd - renderStart + len(newLines) - len(oldLines)
 
 	// Build minimap data
 	m.minimapData = minimap.New(m.totalLines)
-	// Mark removed lines
-	m.minimapData.SetRange(changeStart, changeEnd, minimap.LineRemoved)
-	// Mark added lines (they appear after the removed lines in the view)
-	// The added lines logically replace the removed ones at changeStart
+	minimapChangeStart := changeStart - renderStart
+	minimapChangeEnd := changeEnd - renderStart
+	m.minimapData.SetRange(minimapChangeStart, minimapChangeEnd, minimap.LineRemoved)
 	for i := 0; i < len(newLines); i++ {
-		m.minimapData.SetLine(changeStart+i, minimap.LineAdded)
+		m.minimapData.SetLine(minimapChangeStart+i, minimap.LineAdded)
 	}
 
 	// Show diff header with stats
@@ -4007,11 +3987,16 @@ func (m *Model) renderFileWithChange(change Change) string {
 	sb.WriteString(m.theme.Removed.Render(fmt.Sprintf("-%d", len(oldLines))))
 	sb.WriteString("\n\n")
 
+	// Show truncation notice if we're not starting from line 1
+	if renderStart > 0 {
+		sb.WriteString(m.theme.Dim.Render(fmt.Sprintf("  ... %d lines above ...\n", renderStart)))
+	}
+
 	// Soft highlight style for changed lines
 	changedBg := lipgloss.NewStyle().Background(m.theme.ChangedLineBg)
 
-	// Render the entire file
-	for i := 0; i < len(fileLines); i++ {
+	// Render only the context window
+	for i := renderStart; i < renderEnd; i++ {
 		lineNum := fmt.Sprintf("%4d", i+1)
 		line := fileLines[i]
 
@@ -4034,7 +4019,6 @@ func (m *Model) renderFileWithChange(change Change) string {
 			// After the last removed line, insert the new lines
 			if i == changeEnd-1 {
 				for j, newLine := range newLines {
-					// Apply horizontal scroll to new lines too
 					scrolledNew := newLine
 					if m.scrollX > 0 && len(newLine) > m.scrollX {
 						scrolledNew = newLine[m.scrollX:]
@@ -4060,6 +4044,11 @@ func (m *Model) renderFileWithChange(change Change) string {
 		}
 	}
 
+	// Show truncation notice if we're not ending at the last line
+	if renderEnd < len(fileLines) {
+		sb.WriteString(m.theme.Dim.Render(fmt.Sprintf("  ... %d lines below ...\n", len(fileLines)-renderEnd)))
+	}
+
 	return sb.String()
 }
 
@@ -4069,9 +4058,29 @@ func (m *Model) scrollToChange() {
 		return
 	}
 	change := m.changes[m.selectedIndex]
-	// Scroll to a few lines before the change so it's visible in context
-	// Add 2 for the header lines in the diff view
-	targetLine := change.LineNum - 3
+
+	// Calculate where the change appears in the rendered content
+	// renderFileWithChange limits context to 100 lines before/after
+	const contextLines = 100
+	changeStart := change.LineNum - 1 // 0-indexed
+
+	// Calculate renderStart (same logic as renderFileWithChange)
+	renderStart := changeStart - contextLines
+	if renderStart < 0 {
+		renderStart = 0
+	}
+
+	// The change appears at this position in rendered content:
+	// - 2 lines for diff header (@@ line + blank line)
+	// - 1 line for truncation notice if renderStart > 0
+	// - (changeStart - renderStart) lines of context before the change
+	headerLines := 2
+	if renderStart > 0 {
+		headerLines++ // truncation notice
+	}
+
+	// Position change with some context visible above it
+	targetLine := headerLines + (changeStart - renderStart) - 3
 	if targetLine < 0 {
 		targetLine = 0
 	}
@@ -4570,7 +4579,7 @@ func parsePayload(data []byte) *Change {
 
 	logger.Log("parsePayload: tool_name=%s", payload.ToolName)
 
-	// Extract file path (try multiple locations)
+	// Extract file path (try multiple locations: nested and flat formats)
 	filePath := payload.ToolInput.FilePath
 	if filePath == "" {
 		filePath = payload.ToolInput.Path
@@ -4581,16 +4590,24 @@ func parsePayload(data []byte) *Change {
 	if filePath == "" {
 		filePath = payload.Parameters.Path
 	}
+	// Flat format fallback
+	if filePath == "" {
+		filePath = payload.FilePath
+	}
 	logger.Log("parsePayload: filePath=%s", filePath)
 	if filePath == "" {
 		logger.Log("parsePayload: filePath empty, returning nil")
 		return nil
 	}
 
-	// Extract old/new strings
+	// Extract old/new strings (nested and flat formats)
 	oldStr := payload.ToolInput.OldString
 	if oldStr == "" {
 		oldStr = payload.Parameters.OldString
+	}
+	// Flat format fallback
+	if oldStr == "" {
+		oldStr = payload.OldString
 	}
 
 	newStr := payload.ToolInput.NewString
@@ -4599,6 +4616,13 @@ func parsePayload(data []byte) *Change {
 	}
 	if newStr == "" {
 		newStr = payload.ToolInput.Content
+	}
+	// Flat format fallback
+	if newStr == "" {
+		newStr = payload.NewString
+	}
+	if newStr == "" {
+		newStr = payload.Content
 	}
 
 	// Read the full file content

@@ -300,6 +300,8 @@ func (d *Daemon) processPayload(payload *HookPayload) error {
 					logger.Log("Compressed file snapshot: %d bytes -> %d bytes", len(decoded), len(edit.FileSnapshot))
 				}
 			}
+		} else {
+			logger.Log("No file_content_b64 provided for %s (file: %s)", payload.ToolName, payload.FilePath)
 		}
 
 		if err := d.db.RecordEdit(edit); err != nil {
